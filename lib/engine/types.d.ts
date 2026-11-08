@@ -121,6 +121,8 @@ export interface ChannelAdapter {
      * 渠道不实现该方法时，引擎不会发送思考内容，只保留状态行。
      */
     sendThinking?(chatId: string, text: string, options?: ThinkingOptions): Promise<void>;
+    /** 支持最新片段预览和只读展开按钮；不具备此能力的渠道保持既有前缀策略。 */
+    readonly thinkingPreview?: 'latest';
 }
 /** 思考过程截断提示语（基础文案）。 */
 export declare const DEFAULT_TRUNCATED_NOTE = "\u2026\uFF08\u5DF2\u622A\u65AD\uFF0C\u5B8C\u6574\u5185\u5BB9\u89C1\u7F51\u9875\u4F1A\u8BDD\uFF09";
@@ -134,6 +136,10 @@ export interface ThinkingOptions {
     signal?: AbortSignal;
     /** 每次实际请求（含重试）前重新检查当前绑定与投递许可。 */
     isCurrent?: () => boolean;
+    /** 最新片段试验模式；由支持该能力的渠道和跟踪器协商，不影响其他渠道。 */
+    previewMode?: 'latest';
+    /** 已完成消息的只读展示许可；正常收口后可继续查看，显式停止/换绑/新回合须撤销。 */
+    isViewCurrent?: () => boolean;
     /** 引擎为限制内存已截断原文，渠道仍需显示截断说明。 */
     truncated?: boolean;
     /** 本回合的最后一次更新：标题改为「已完成」并释放句柄。 */
