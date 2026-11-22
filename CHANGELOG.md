@@ -19,144 +19,29 @@
 - **Oversized reply streaming & automatic cache cleanup**: Smoothly chunks and delivers responses exceeding 1MB without blocking delivery pipelines, and immediately releases cached text and slices from local storage once delivered to minimize disk footprint.
 
 ## [1.0.49] - 2026-11-21
+## [Unreleased]
 
-### Sidebar Channel Sessions Grouped by Account Instance & Quick Settings (#78)
+### Per-account Telegram topic naming
 
-- **Account-level session grouping**: When multiple accounts are configured for the same messaging platform, sidebar sessions are neatly organized into dedicated groups per account instance, preventing conversations across accounts from mixing together.
-- **Clear & intuitive group titles**: Displays a clean platform title (e.g., "WeChat", "WeCom") in single-account environments, and automatically appends account remarks or custom names (e.g., "WeChat · Support") in multi-account environments.
-- **Direct account settings via context menu**: Right-clicking any channel group heading now opens the settings and diagnostics panel for that specific account directly, making it faster to adjust credentials and remarks.
-- **Instant title refresh on remark change**: Updating an account's remark name immediately refreshes the sidebar group title in real time without requiring a reload or restart.
-- **Context menu presentation cleanup**: Fixed an issue where right-clicking a channel group could inadvertently leave the menu item labeled as "Rename", and eliminated extraneous blank space and divider lines at the bottom of the menu for a cleaner look.
+- Add an optional `topicNaming: 'off' | 'once' | 'follow'` policy to each Telegram account. A missing value inherits the existing plugin `topicNaming` configuration (default `once`), so accounts and configurations created before this change keep their behavior.
+- Add **Automatically sync topic names** with an On/Off switch and a First title only / Follow latest selector to the Telegram account settings. The setting applies to that account only, is saved through the existing account update endpoint (including pending setup settings), and takes effect immediately without reconnecting, reloading, or restarting the account.
+- Resolve the policy from the actually bound account whenever an automatic topic rename runs, including queued writes and `/topicname` status/on/off replies. Account-level `off` suppresses automatic renames for that account while DSH session titles keep updating; explicit `/rename` still works, and manual-rename/per-topic freezes keep precedence.
+- Reject explicit values outside `off`/`once`/`follow` on connect and update; non-Telegram platforms never acquire the per-account policy. Naming state and locks continue to live in `topic-titles.json`.
+- A rename request already in flight cannot be unsent; later queued writes observe the updated policy.
 
-## [1.0.48] - 2026-11-20
+### Cross-plugin topic opening persistence
 
-### WeCom Custom WebSocket URL for On-Premise Deployments (#76)
-
-- **Custom WebSocket URL support**: Added support for configuring a custom WebSocket URL (`ws://` or `wss://`) for WeCom (Work WeChat), enabling seamless connection to self-hosted gateway servers in on-premise environments.
-- **Graceful fallback to official default**: When left blank during credential setup or in account settings, WeCom automatically falls back to the official default address (`wss://openws.work.weixin.qq.com`).
-- **Dynamic configuration update & reconnection**: Existing WeCom accounts can inspect, modify, or clear the WebSocket URL at any time from the account settings panel, which automatically reconnects to apply changes upon saving.
-
-## [1.0.47] - 2026-11-20
-
-### Feishu & Lark Long Reasoning Display (#75)
-
-- **Complete streaming display for long reasoning chains**: Feishu and Lark native reasoning bubbles now support full streaming display for lengthy chains of thought with a generous 64K budget, eliminating premature truncation at 3,500 characters.
-- **Clear note for extremely long reasoning**: When reasoning output exceeds 65,536 characters, the initial 64K content is preserved cleanly with an informative truncation notice appended at the end.
-- **Card payload safety in message threads**: Collapsible reasoning cards in group threads and card fallbacks strictly enforce platform size constraints, ensuring stable presentation and preventing card delivery errors.
-
-## [1.0.46] - 2026-11-19
-
-### Host Compatibility Matrix & Stability
-
-- **DeepSeek Harness >=0.2.2-rc.1 support**: Upgraded host support matrix to DeepSeek Harness `>=0.2.2-rc.1 <0.3.0-0`, fully verified on official release candidates `0.2.2-rc.1` through `0.2.2-rc.5`.
-- **Legacy migration notice**: Host environments running earlier `0.2.0`–`0.2.1` releases will be rejected by the version gate; users on those versions should stay on plugin version `1.0.45`.
-- **Status & thinking progress display**: Improved the timeout handling for status progress feedback so that the final status banner duration aligns cleanly with the overall feedback budget, ensuring status notices remain visible without premature dismissal during long-running tasks.
-
-## [1.0.45] - 2026-11-18
-
-### Sidebar Tab Strip & Layout Stability
-
-- **Sidebar single-strip layout fix (#73)**: Resolved an issue where multiple stacked tab bars could occasionally appear in the sidebar under duplicate plugin initialization or repeated view re-entry, which compressed and truncated the workspace and session list. The sidebar now strictly maintains a single unified tab strip across all view transitions, ensuring uninterrupted visibility for workspace sessions.
-
-## [1.0.44] - 2026-11-17
-
-### Feishu & Lark Thread Session Settings Experience
-
-- **Standard dropdown picker & tooltip**: The "Thread session isolation" setting in Feishu and Lark account details has been upgraded to a standard select picker (with "Off" and "Isolated sessions" options), accompanied by a helpful tooltip explaining that threads maintain isolated conversation context when enabled and share group context when disabled.
-- **Full multilingual localization**: Added localized labels and explanation tooltips for thread session isolation across all 8 supported languages (German, English, Spanish, French, Japanese, Portuguese, Russian, and Simplified Chinese).
-- **Reliable account settings synchronization**: Refined account detail saving and configuration synchronization to ensure platform-specific options (such as thread session isolation and thinking process display) take effect reliably with smooth account reloading.
-
-## [1.0.43] - 2026-11-17
-
-### Feishu & Lark Thinking Process
-
-- **Native thinking process bubbles**: Added support for displaying model reasoning (Thinking Process) in Feishu and Lark. Direct messages and main group chats use official native thinking process bubbles that can be expanded to review the complete chain of thought.
-- **In-thread collapsible fallback**: In group message threads, reasoning automatically falls back to an expandable card panel (`collapsible_panel`), ensuring thought processes stay within the thread without leaking to the main lobby; smoothly falls back to cards if the tenant lacks native permissions.
-- **Long reasoning & complex emoji display**: Improved presentation for long reasoning steps and composite emojis (such as diverse family and skin-tone emoji sequences), preventing split characters, garbled text, or corrupted symbols when displaying lengthy thought processes.
-- **How to enable**: Navigate to Settings → IM Connect → Feishu/Lark account settings, and set "Thinking process display" to "Collapsed" (defaults to system preference).
-
-## [1.0.42] - 2026-11-17
-
-### Feishu Threads & Reply Experience
-
-- **Thread session isolation**: Added a "Thread session isolation" toggle in Feishu and Lark account settings. When enabled, group message threads maintain isolated conversation sessions and context bounded by each thread; disabled by default (shares group context).
-- **Accurate in-thread replies**: Improved reply routing for Feishu group messages and threads, ensuring responses stay strictly within the original thread and eliminating unintended fallbacks to the main lobby.
-- **Interactive cards & buttons**: Added parsing support for Feishu interactive card messages; button interactions within a thread retain full thread context, ensuring approvals and option choices resolve in place.
-
-### Delivery & Silent Protocol
-
-- **Silent reply protocol**: Added support for `NO_REPLY` (and `<<<NO_REPLY>>>`) silent markers. When the assistant determines no user-visible response is needed, it finishes the turn silently without sending fallback notice cards.
-
-## [1.0.41] - 2026-11-15
-
-### UI & Layout Fixes
-
-- The Task / Channel tab strip no longer scrolls out of view when the sidebar workspace list is scrolled: the sidebar shell now matches the scroll area exactly, so the tabs stay in place while the list scrolls beneath them.
-
-## [1.0.40] - 2026-11-14
-
-### Host Compatibility
-
-- Verified against the full DSH `0.2.2` line (`0.2.2-rc.1` through `0.2.2-rc.3`), including the uploaded-file receipt and session model-selection contracts that generation changed.
-
-## [1.0.39] - 2026-11-14
-
-### Host Compatibility
-
-- DSH host support now covers `0.2.2-rc.3`; the verified host list, development baseline and localized README badges follow the same version.
-
-## [1.0.38] - 2026-11-13
-
-### Settings UI Standardization
-
-- Unified settings header card: wrapped the header in an elevated card container for seamless visual consistency across settings.
-- Native button and icon styling: updated the issue feedback action to use the host's native pen icon and outline button primitive.
-
-## [1.0.37] - 2026-11-12
-
-### Compatibility & Dependencies
-
-- Verified full compatibility with DeepSeek Harness `0.2.2-rc.2`, covering `0.2.0-rc.1` through `0.2.2-rc.2` and subsequent `0.2.x` pre-releases.
-- Align development dependencies with official `0.2.2-rc.2` and Schemastery `3.19.0`, and update documentation compatibility lists and CI contract test coverage (`0.2.0-rc.1` through `0.2.1-rc.5`).
-
-## [1.0.35] - 2026-11-10
-
-### Telegram connection resilience, reaction reliability, and delivery safeguards
-
-- Improve Telegram long-polling resilience: in constrained networking environments (such as NAT or containers), long-polling automatically recovers and resumes message dispatch after aborted or stalled connections, preventing silent bot hang-ups (#64, #68).
-- Enhance status reactions and typing heartbeat stability: status reactions (thinking, finished, etc.) now retry on transient network errors or rate limits with atomic replacement, preventing missing delivery emojis; typing heartbeats feature expanded budgets and quota isolation, preventing premature cancellations over slow connections (#67).
-- Safeguard final replies and unclaimed turns: protect historical requests from accidental matching during cold starts, and serialize final reply settlement to ensure long assistant responses are fully delivered before turn cleanup (#66).
-- Documentation and settings streamlining: remove obsolete updater options now handled directly by the host plugin system, and align configuration section numbering across all localized README manuals.
-
-## [1.0.34] - 2026-11-09
-
-### Mobile sidebar interaction & channel session routing improvements
-
-- Fix session opening from inserted channel tabs on mobile: clicking an IM channel session row in mobile drawers or external sidebar shells now properly restores and switches into the IM conversation, instead of falling back to a regular task session (#65).
-- Fix duplicate icon display in mobile drawer navigation: when viewing sidebar shortcuts within mobile drawer sheets, the IM assistant entry cleanly displays its single icon with natural spacing, avoiding duplicate icon rendering.
-
-## [1.0.33] - 2026-11-09
-
-### Clean header navigation & documentation streamlining
-
-- Two-tier navigation layout: split the README header links into two clean rows — the top row focuses on 8-language switching, while the second row clearly presents the Changelog and License.
-- Prune internal handover links: remove internal development handover links from public documentation for a cleaner and more professional presentation.
-
-## [1.0.32] - 2026-11-09
-
-### Full multi-language README documentation & language navigation
-
-- Dedicated documentation across 8 languages: provide comprehensive native README files for Japanese (`README.ja.md`), Spanish (`README.es.md`), French (`README.fr.md`), German (`README.de.md`), Russian (`README.ru.md`), and Portuguese (`README.pt.md`).
-- Accurate localized detail display: plugin marketplace and details view now match the host's active locale with its dedicated native manual.
-- Header language switcher: add an 8-language switcher navigation bar at the top of all README files for quick access.
-
-## [1.0.31] - 2026-11-09
-
-### Full 8-language i18n & streamlined plugin management
-
-- Native 8-language support: provide full interface and manifest localization across Simplified Chinese, English, Japanese, Spanish, French, German, Russian, and Portuguese (Brazil), offering a seamless native experience across all supported host locales.
-- Document fallback for global users: align plugin detail pages with host language fallbacks, ensuring non-Chinese environments display the comprehensive English documentation.
-- Streamlined settings experience: remove obsolete update controls and buttons from the settings header, fully delegating plugin lifecycles and updates to the official DSH plugin manager.
+- Expose the `imTopicContext` cordis service: other plugins call `ctx.get('imTopicContext')` (no `inject`, so the caller keeps working while this plugin is unloaded) and `seedOpening({ channelId, chatId, title?, text, messageId? })` persists an opening message that was already sent through the platform Bot API.
+- The opening is injected through the host `Agent.inject()` into the `next-step` inbox and becomes a model-visible `user/message` after the system prompt on the next real turn. No model call, no reply, no `turn/start` / `turn/end`, no channel delivery, so goal rounds, turn stats and the IM gateway never treat it as a model turn or resend it to the chat.
+- The message source is `{ kind: 'im-topic-opening' }` and the body carries a quotation marker stating it is the bot's earlier topic opening, not a new user instruction.
+- Idempotency and durability are decided by the session log, not by a sidecar: every call folds the current mapping's session (admitted `user/message` plus inbox splices); the deterministic `im-topic-opening-<hash>` id with the same text only re-confirms durability, while a different text returns `persisted: false, conflict: 'opening-exists'`. `topic-openings.json` only remembers topic text; the log self-heals when that file is lost.
+- Receipts report `sessionId` (current mapping) and `persisted` separately; `persisted` is true only when `sessions.flush()` explicitly returns `true`, so a missing persistence listener, `false` or a rejection all report `flush-failed`.
+- The public service only accepts Telegram topics (`"<negative group id>:<thread id>"`); General (`thread=1`) is rejected, and the channel guard only admits enabled account entries whose platform is `telegram`. Invalid input throws `TypeError` instead of creating an arbitrary session.
+- The receipt `reason` set and `message` texts are a frozen cross-plugin contract (`channel-disabled`, `archived`, `session-busy`, `bind-failed`, `unsupported`, `session-unavailable`, `inject-failed`, `flush-failed`, `opening-exists`); callers must be updated together with any change.
+- `seedOpening(input, { signal })` honours cancellation after queueing and before injection; a `flush()` that has already started is never withdrawn, so a caller timeout should be treated as pending verification.
+- The sidecar is only an index: conflicts are decided by the session log, so a stale sidecar entry no longer blocks a new text once the old session is gone. Duplicate or invalid inbox splices are ignored instead of being folded into duplicate messages.
+- Late backfill never rotates: an existing mapping is resumed with `ensure`, so an archived or unrecoverable session returns `archived` / `session-unavailable` instead of spawning a replacement. While the session is running a turn the service returns `session-busy`, so the injected `next-step` message cannot be consumed by the current step.
+- Also resolves the live-agent resume path (`binding.handle` is empty when `router.resume` finds the agent through `ctx.agents.get`) by loading the agent from the agents service or `sessionController` before calling `inject()`.
 
 ## [1.0.30] - 2026-11-08
 

@@ -7,9 +7,10 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { mkdirSync } from 'node:fs'
 import { ChannelManager } from './manager.js'
-import { DEFAULT_THINKING_MAX_CHARS, type EngineConfig } from './engine/types.js'
+import type { EngineConfig } from './engine/types.js'
 import type { TopicMode } from './engine/topic-title.js'
 import { createRotatingFileAppender } from './engine/file-log.js'
+import { registerPluginUpdater } from './plugin-updater.js'
 import { withReplyLocale } from './engine/command-locale.js'
 import { captureWorkspaceRuntime } from './workspace-runtime.js'
 
@@ -43,6 +44,8 @@ export interface PluginConfig {
   segmentDelayMaxSecs?: number
   /** 思考过程折叠消息；缺省关闭，只有渠道实现 sendThinking 时才生效。 */
   thinkingDisplay?: EngineConfig['thinkingDisplay']
+  updater?: boolean
+  onlineUpdate?: boolean
 }
 
 export const Config: Schema<PluginConfig> = Schema.object({
@@ -61,11 +64,14 @@ export const Config: Schema<PluginConfig> = Schema.object({
     mode: Schema.union(['off', 'collapsed']).default('off').description('思考过程投递：off 关闭，collapsed 发成可折叠消息。'),
     minChars: Schema.number().default(120).description('累计到这个字数才发第一条思考消息。'),
     intervalMs: Schema.number().default(2000).description('两次思考消息刷新之间的最小间隔（毫秒）。'),
-    maxChars: Schema.number().default(DEFAULT_THINKING_MAX_CHARS).description('单条思考消息允许的最大字符数（原生流式长思维链渠道如飞书除外，享有 64K 原生流式预算）。'),
-  }).description('思考过程折叠消息；需要渠道实现 sendThinking（目前支持 Telegram、飞书与 Lark）。'),
+    maxChars: Schema.number().default(3500).description('单条思考消息允许的最大字符数。'),
+  }).description('思考过程折叠消息；需要渠道实现 sendThinking（目前为 Telegram）。'),
+  updater: Schema.boolean(),
+  onlineUpdate: Schema.boolean(),
 })
 
 export function apply(ctx: Context, config: PluginConfig): void {
+  const hostUpdateDisabled = config.updater === false || config.onlineUpdate === false
   const permissionPresets = (ctx as Context & { permissionPresets: { defaultPreset: string } }).permissionPresets
   const stateDir = config.stateDir !== ''
     ? config.stateDir
@@ -96,8 +102,13 @@ export function apply(ctx: Context, config: PluginConfig): void {
 
   captureWorkspaceRuntime(import.meta.url, log)
   const applyStarted = Date.now()
-  const manager = new ChannelManager({ ctx, stateDir, log, engineConfig })
+  const manager = new ChannelManager({ ctx, stateDir, log, engineConfig, hostUpdateDisabled })
   log(`[boot] ChannelManager 构造 ${Date.now() - applyStarted}ms`)
+  // 跨插件入口：话题开场白持久化。只写会话收件箱（下次真实回合模型可见），
+  // 不发网络请求、不启动回合、不向任何渠道投递；调用方用 ctx.get('imTopicContext') 取。
+  // 老宿主/测试夹具可能没有 provide，此时保持插件其余功能可用。
+  if (typeof ctx.provide === 'function') ctx.provide('imTopicContext', manager.topicContext)
+  else log('[boot] 宿主没有 ctx.provide，未暴露 imTopicContext')
   // 分段回复：把「用标记分隔多条消息」的规则挂进系统提示。
   // 只有本插件已绑定、且该账号开启了分段回复的会话才拿到这段说明，其余会话提示词不变。
   const promptHost = ctx as unknown as {
@@ -134,6 +145,27 @@ export function apply(ctx: Context, config: PluginConfig): void {
       interpolate: false,
     })
   }, 'im-connect.segment-section')
+  // Binding context is intentionally separate from per-message origin data and external display names.
+  ctx.effect(() => {
+    const systemPrompt = promptHost.systemPrompt
+    if (!systemPrompt) return () => {}
+    return systemPrompt.section({
+      name: 'im-connect-reply-channel',
+      order: sectionOrder + 1,
+      text: (context) => {
+        const sessionId = context?.agent?.session?.header?.id
+        if (typeof sessionId !== 'string' || sessionId.length === 0) return ''
+        return manager.replyChannelInstructionForSession(sessionId)
+      },
+      interpolate: false,
+    })
+  }, 'im-connect.reply-channel-section')
+  ctx.effect(() => registerPluginUpdater(ctx, {
+    endpoint: '/api/michengai/dsh-im-connect/update',
+    packageName: '@michengai/dsh-im-connect',
+    manifestUrl: new URL('../package.json', import.meta.url),
+    isEnabled: async () => !hostUpdateDisabled && manager.isUpdateEnabled(),
+  }), 'im-connect.plugin-updater')
   ctx.effect(() => {
     manager.registerApi(ctx)
     // 卸载或初始化失败后不再恢复会话；保留一个完整异常链，避免后台拒绝终止宿主。
@@ -157,3 +189,4 @@ export {
   sessionKeyOf,
 } from './engine/session-id.js'
 export { splitText } from './engine/split.js'
+export type { TopicOpeningInput, TopicOpeningReceipt } from './engine/topic-context.js'

@@ -11,6 +11,7 @@ export interface DeferredEntry {
     text?: string;
     parts?: string[];
     offset: number;
+    platformMessageIds?: string[];
 }
 type Event = {
     type?: string;

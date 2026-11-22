@@ -8,7 +8,7 @@ import type { ImMessage } from './types.js'
 export interface DeferredEntry {
   id: string; sessionId: string; channelId: string; message: ImMessage; createdAt: number
   turn?: number; status: 'waiting' | 'ready' | 'sending' | 'sent' | 'unknown' | 'blocked' | 'expired' | 'rejected'
-  text?: string; parts?: string[]; offset: number
+  text?: string; parts?: string[]; offset: number; platformMessageIds?: string[]
 }
 type Event = { type?: string; seq?: number; surfaceOp?: unknown; data?: any }
 
@@ -58,7 +58,8 @@ export class DeferredDelivery {
           || (entry.turn !== undefined && !Number.isSafeInteger(entry.turn))
           || this.entries.some(e => e.id === entry.id)
           || (entry.parts !== undefined && (!Array.isArray(entry.parts) || !entry.parts.every((p: unknown) => typeof p === 'string') || entry.offset > entry.parts.length))
-          || (entry.text !== undefined && typeof entry.text !== 'string')) throw new Error('Invalid delivery record')
+           || (entry.text !== undefined && typeof entry.text !== 'string')
+           || (entry.platformMessageIds !== undefined && (!Array.isArray(entry.platformMessageIds) || !entry.platformMessageIds.every((id: unknown) => typeof id === 'string' && id.length > 0)))) throw new Error('Invalid delivery record')
         if (entry.status === 'sending') entry.status = 'unknown'
         this.entries.push(entry)
       }
