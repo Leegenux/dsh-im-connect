@@ -1323,7 +1323,9 @@ export class ImEngine {
       if (reason?.kind === 'error' && !trackedEnd) {
         const detail = reason.error?.message || '模型调用失败'
         this.log(`[${channel.id}] 回合失败 ${sessionId}: ${detail}`)
-        const failed = notice(this.ctx, '助手没有生成回复，请查看本机日志。')
+        const failed = detail
+           ? `${notice(this.ctx, '助手没有生成回复，请查看本机日志。')}\n\n${detail}`
+           : notice(this.ctx, '助手没有生成回复，请查看本机日志。')
         const taken = await this.streams.take(streamKey, sessionId)
         if (taken.invalidated || !stillDeliverable()) {
           await this.discardEmptyTake(taken)
@@ -1528,7 +1530,7 @@ export class ImEngine {
     if (!valid()) return
     const terminalIds: string[] = []
     const notified = await withReplyLocale(this.ctx, async () => {
-      const text = ({
+      const summary = ({
         empty: replyText('本次处理已结束，未返回可投递的结果。可补充要求后继续。'),
         error: replyText('本次处理失败，已返回的内容保留。请查看会话状态，或补充要求后重试。'),
         cancelled: result.reasonKind === 'max-tokens'
@@ -1536,6 +1538,8 @@ export class ImEngine {
           : replyText('本次处理已停止，已返回的内容保留。可直接发消息继续。'),
         'delivery-failed': replyText('本次处理已结束，但部分回复或文件未能发送。查看交付记录：/delivery；完整结果和文件请在网页查看，不会自动重复执行任务。'),
       })[status]
+      const detail = result.status === 'error' && result.errorMessage?.trim() ? result.errorMessage.trim() : ''
+      const text = detail ? `${summary}\n\n${detail}` : summary
       if (!valid()) return
       if (result.status === 'error' || result.status === 'cancelled' || result.status === 'empty') {
         for (const entry of this.deferred.list(channel.id, message)) if (entry.sessionId === result.sessionId && entry.turn === result.turn && entry.status === 'waiting') {
