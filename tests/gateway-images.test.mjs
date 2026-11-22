@@ -28,6 +28,14 @@ function setup(t, id = 'account-opaque-123', controller, options = {}) {
   return { send, calls, messages, sent, sessionId, dir, ctx, engine }
 }
 
+test('image admission waits for the Chat controller during Host startup', async t => {
+  const h = setup(t, undefined, null)
+  setTimeout(() => h.ctx.set('sessionController', { async prompt(request, signal) { h.calls.push(request); assert.equal(signal.aborted, false); return { accepted: true } } }), 40)
+  await h.send()
+  assert.equal(h.calls.length, 1)
+  assert.equal(h.sent.length, 0)
+})
+
 test('image admission ignores an inactive Cordis provider until it becomes active', async t => {
   const h = setup(t)
   const implementation = h.ctx.reflect._getImpl('sessionController', false)

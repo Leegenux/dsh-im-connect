@@ -118,6 +118,7 @@ export declare class ImEngine {
     private rotateIdleSession;
     /** 会话是否仍在运行；查不到状态时按运行中处理，宁可延续上下文也不切断任务。 */
     private sessionRunning;
+    private waitForImagePromptController;
     private inject;
     private cancelInputs;
     private approvalVerdict;
