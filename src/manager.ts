@@ -265,8 +265,6 @@ export interface AccountView {
   proxyConfigured: boolean
   proxyUrl?: string
   mentionPolicy?: 'addressed' | 'always'
-  freeChatGroups?: string
-  thinkingDisplay?: boolean
   threadSessions?: boolean
   wsUrl?: string
   lastCheckedAt?: string
@@ -325,6 +323,7 @@ interface Persisted {
   permission?: PermissionPreset
   entryLocation?: EntryLocation
   sidebarEntry?: boolean
+  onlineUpdate?: boolean
   taskTreeSessions?: boolean
 }
 
@@ -354,6 +353,7 @@ export class ChannelManager {
   private readonly log: (line: string) => void
   private readonly ctx: Context
   private readonly engineConfig: EngineConfig
+  private readonly hostUpdateDisabled: boolean
   private store: Persisted = { channels: {}, allowlist: {}, pending: {} }
   private readonly running = new Map<string, ChannelAdapter>()
   private readonly proxyUrlCache = new Map<string, string>()
@@ -368,9 +368,10 @@ export class ChannelManager {
   private readonly reconnectAttempts = new Map<string, number>()
   private readonly starting = new Set<string>()
 
-  constructor(options: { ctx: Context; stateDir: string; log: (line: string) => void; engineConfig: EngineConfig }) {
+  constructor(options: { ctx: Context; stateDir: string; log: (line: string) => void; engineConfig: EngineConfig; hostUpdateDisabled?: boolean }) {
     this.ctx = options.ctx
     this.engineConfig = options.engineConfig
+    this.hostUpdateDisabled = options.hostUpdateDisabled === true
     this.stateDir = options.stateDir
     this.file = join(options.stateDir, 'channels.json')
     this.sessions = new SessionMapStore(join(options.stateDir, 'sessions.json'))
@@ -518,14 +519,6 @@ export class ChannelManager {
       ...(supportsProxy(platform) && this.proxyUrlCache.has(accountId) ? { proxyUrl: this.proxyUrlCache.get(accountId)! } : {}),
       ...(platform === 'telegram' ? {
         mentionPolicy: config.mentionPolicy === 'always' ? 'always' : 'addressed',
-        freeChatGroups: typeof config.freeChatGroups === 'string' ? config.freeChatGroups : '',
-      } : {}),
-      ...((platform === 'telegram' || platform === 'feishu' || platform === 'lark') ? {
-        thinkingDisplay: config.thinkingDisplay === 'true'
-          ? true
-          : (config.thinkingDisplay === 'false'
-            ? false
-            : (this.engineConfig.thinkingDisplay?.mode === 'collapsed')),
       } : {}),
       ...((platform === 'feishu' || platform === 'lark') ? {
         threadSessions: config.threadSessions === 'true',
@@ -847,6 +840,28 @@ export class ChannelManager {
           send(405, { ok: false, error: 'method not allowed' })
           return
         }
+        if (parts[2] === 'online-update' && parts.length === 3) {
+          if (method === 'GET' || method === 'HEAD') {
+            send(200, method === 'HEAD' ? undefined : { ok: true, enabled: this.isUpdateEnabled(), locked: this.isHostUpdateDisabled() })
+            return
+          }
+          if (method === 'POST') {
+            if (this.isHostUpdateDisabled()) {
+              send(403, { ok: false, error: '在线更新已被宿主配置锁定禁用' })
+              return
+            }
+            const body = await readBody()
+            if (!body || typeof body.enabled !== 'boolean') {
+              send(400, { ok: false, error: 'enabled 必须是布尔值' })
+              return
+            }
+            const enabled = await this.setOnlineUpdate(body.enabled)
+            send(200, { ok: true, enabled })
+            return
+          }
+          send(405, { ok: false, error: 'method not allowed' })
+          return
+        }
         if (parts[2] === 'task-tree-sessions' && parts.length === 3) {
           if (method === 'GET' || method === 'HEAD') {
             send(200, method === 'HEAD' ? undefined : { ok: true, enabled: this.getTaskTreeSessions() })
@@ -1129,6 +1144,23 @@ export class ChannelManager {
   async setTaskTreeSessions(enabled: boolean): Promise<boolean> {
     if (typeof enabled !== 'boolean') throw new Error('enabled 必须是布尔值')
     this.store.taskTreeSessions = enabled
+    this.flush()
+    return enabled
+  }
+
+  isHostUpdateDisabled(): boolean {
+    return this.hostUpdateDisabled
+  }
+
+  isUpdateEnabled(): boolean {
+    if (this.hostUpdateDisabled) return false
+    return this.store.onlineUpdate !== false
+  }
+
+  async setOnlineUpdate(enabled: boolean): Promise<boolean> {
+    if (typeof enabled !== 'boolean') throw new Error('enabled 必须是布尔值')
+    if (this.hostUpdateDisabled) throw new Error('在线更新已被宿主配置锁定禁用')
+    this.store.onlineUpdate = enabled
     this.flush()
     return enabled
   }

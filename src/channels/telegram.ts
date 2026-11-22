@@ -95,6 +95,11 @@ const STATUS_REACTION_DELAYS_MS = [400, 1200] as const
  * 放宽到 6 秒仍然有界，不会堆积请求。
  */
 const TYPING_REQUEST_TIMEOUT_MS = 6000
+/**
+ * typing 自己吃到 429 后的退避上限。正文 / 编辑的冷却再长也不牵连 typing：
+ * 一个群被编辑限流几十秒时，「正在输入」不该跟着整段消失。
+ */
+const TYPING_COOLDOWN_MAX_MS = 30_000
 
 function isTerminalStatus(state: string): boolean {
   return state === 'success' || state === 'ended' || state === 'error' || state === 'cancelled'
@@ -117,36 +122,6 @@ interface PersistedAlbums {
   albums: Record<string, AlbumEntry>
 }
 
-/**
- * 状态表情的总预算。冷连接（刚启动、连接被平台关掉之后）的 TLS 握手 + 请求
- * 会明显超过 2 秒，热连接约 0.6 秒；只给一次 2 秒的机会正是「偶发丢表情」的来源。
- */
-const STATUS_REACTION_TIMEOUT_MS = 10_000
-/**
- * 结果表情（完成 / 失败 / 取消）的预算：整聊天限流时 retry_after 常有 20–40 秒，
- * 中间态等它没有意义，但晚到的 👍 仍然有用，所以终态愿意等过一次冷却。
- */
-const STATUS_REACTION_FINAL_TIMEOUT_MS = 50_000
-/** 单次尝试的预算：一次尝试不能吃掉整个重试窗口。 */
-const STATUS_REACTION_ATTEMPT_TIMEOUT_MS = 3000
-/** 状态表情的重试间隔；限流时按 retry_after 放宽，冷却太长则直接放弃。 */
-const STATUS_REACTION_DELAYS_MS = [400, 1200] as const
-/**
- * typing 心跳的请求预算。必须覆盖一次冷连接握手 + 平台往返：
- * 本机到 api.telegram.org 的实测往返是 2.2–2.4 秒，2 秒的上限会在请求送达前
- * 就把它自己取消掉，「正在输入」因此整段消失。typing 每 4 秒才发一次，
- * 放宽到 6 秒仍然有界，不会堆积请求。
- */
-const TYPING_REQUEST_TIMEOUT_MS = 6000
-/**
- * typing 自己吃到 429 后的退避上限。正文 / 编辑的冷却再长也不牵连 typing：
- * 一个群被编辑限流几十秒时，「正在输入」不该跟着整段消失。
- */
-const TYPING_COOLDOWN_MAX_MS = 30_000
-
-function isTerminalStatus(state: string): boolean {
-  return state === 'success' || state === 'ended' || state === 'error' || state === 'cancelled'
-}
 
 /**
  * 编码 Telegram 会话键：

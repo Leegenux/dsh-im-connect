@@ -3,10 +3,18 @@ import type { Context } from '@deepseek-ai/cordis';
 import { type ConnectionState } from './channels/connection-state.js';
 import { type DiagnosticCheck } from './channels/diagnostics.js';
 import type { ChannelId, SessionRecord } from './engine/session-id.js';
+import { ImEngine } from './engine/gateway.js';
 import { type AssistantModel, type PermissionPreset } from './engine/assistant-settings.js';
 import type { EngineConfig, SendMode } from './engine/types.js';
+import { type TopicMode } from './engine/topic-title.js';
 export declare const API_CLIENT_HEADER = "x-dsh-im-connect-client";
 type ChannelProxyMode = 'inherit' | 'direct' | 'custom';
+type ThinkingDisplayMode = 'off' | 'collapsed';
+/**
+ * 自动重连退避：指数增长并带 ±20% 抖动。
+ * 抖动是必要的——多个账号在同一轮宿主重载里同时失败时，不能让它们锁步重连。
+ */
+export declare function reconnectDelayMs(attempt: number, random?: () => number): number;
 interface ApiBodyReadResult {
     body: Record<string, unknown>;
     oversized: boolean;
@@ -32,6 +40,10 @@ export interface ChannelState {
     permission?: PermissionPreset;
     commandPermissions?: CommandPermissions;
     privateAccess?: 'approved' | 'all';
+    /** Undefined preserves legacy adapter configuration; [] explicitly disables bypass. */
+    freeChatGroups?: string[];
+    /** Undefined follows the existing plugin-level thinking configuration. */
+    thinkingDisplayMode?: ThinkingDisplayMode;
     /** 普通消息的默认发送方式；缺省为排队发送。 */
     sendMode?: SendMode;
     /** 分段回复：覆盖插件级默认值；缺省时跟随插件配置。 */
@@ -42,6 +54,8 @@ export interface ChannelState {
     segmentDelayMaxSecs?: number;
     /** 空闲新开会话分钟数：缺省为 0 表示关闭。 */
     sessionIdleMinutes?: number;
+    /** 平台话题自动命名策略；缺省跟随插件全局 topicNaming。仅 Telegram 账号使用。 */
+    topicNaming?: TopicMode;
     lastCheckedAt?: string;
 }
 export interface AccountView {
@@ -62,6 +76,10 @@ export interface AccountView {
     permission: PermissionPreset;
     commandPermissions: CommandPermissions;
     privateAccess: 'approved' | 'all';
+    freeChatGroups: string[];
+    /** Legacy all-group bypass remains effective until an explicit selected-group save. */
+    legacyAllGroupsBypass: boolean;
+    thinkingDisplayMode: ThinkingDisplayMode;
     sendMode: SendMode;
     segmentReply: boolean;
     /** 该渠道是否已开放分段回复；未开放的渠道不展示开关。 */
@@ -70,12 +88,12 @@ export interface AccountView {
     segmentDelayMaxSecs: number;
     /** 空闲新开会话分钟数：0 表示关闭。 */
     sessionIdleMinutes: number;
+    /** 该账号生效的话题命名策略；非 Telegram 账号不开放此能力，固定为 off。 */
+    topicNaming: TopicMode;
     proxyMode: ChannelProxyMode;
     proxyConfigured: boolean;
     proxyUrl?: string;
     mentionPolicy?: 'addressed' | 'always';
-    freeChatGroups?: string;
-    thinkingDisplay?: boolean;
     threadSessions?: boolean;
     wsUrl?: string;
     lastCheckedAt?: string;
@@ -135,11 +153,14 @@ export declare class ChannelManager {
     private readonly stateDir;
     private readonly sessions;
     private readonly engine;
+    /** 跨插件入口：话题开场白持久化（不投递、不启动回合）。 */
+    get topicContext(): ImEngine['topicContext'];
     private readonly vault;
     private readonly pairing;
     private readonly log;
     private readonly ctx;
     private readonly engineConfig;
+    private readonly hostUpdateDisabled;
     private store;
     private readonly running;
     private readonly proxyUrlCache;
@@ -148,11 +169,15 @@ export declare class ChannelManager {
     private readonly channelOperations;
     private apiDisposers;
     private disposed;
+    private readonly reconnectTimers;
+    private readonly reconnectAttempts;
+    private readonly starting;
     constructor(options: {
         ctx: Context;
         stateDir: string;
         log: (line: string) => void;
         engineConfig: EngineConfig;
+        hostUpdateDisabled?: boolean;
     });
     list(): ChannelView[];
     private hydrateProxyUrl;
@@ -187,6 +212,9 @@ export declare class ChannelManager {
     setSidebarEntry(enabled: boolean): Promise<boolean>;
     getTaskTreeSessions(): boolean;
     setTaskTreeSessions(enabled: boolean): Promise<boolean>;
+    isHostUpdateDisabled(): boolean;
+    isUpdateEnabled(): boolean;
+    setOnlineUpdate(enabled: boolean): Promise<boolean>;
     currentAssistant(): AssistantModel | undefined;
     updateAccount(accountId: string, input: Record<string, unknown>): Promise<{
         ok: boolean;
@@ -224,6 +252,17 @@ export declare class ChannelManager {
     private listModelCatalog;
     private startOne;
     private stopOne;
+    /**
+     * 启动失败后的自动重连：指数退避、带抖动，直到成功或账号被显式停止。
+     * 返回是否已排队重试，调用方据此决定给用户看的错误文案。
+     *
+     * 为什么不能只靠轮询循环里的 3s 重试：那只覆盖「已经连上之后」的抖动。
+     * 启动阶段的 getMe 只尝试一次，一次 fetch failed 就会让整个渠道永久停摆，
+     * 用户必须在设置页反复点「重新连接」——这正是本节要消灭的行为。
+     */
+    private scheduleReconnect;
+    private retryStart;
+    private cancelReconnect;
     private persistSecrets;
     private resolveSecrets;
     private migrateLegacyWeixinToken;
@@ -238,11 +277,18 @@ export declare class ChannelManager {
     private accountStateDir;
     /** 与 Chat 使用同一预设名册，不向客户端暴露预设文件路径。 */
     private agentPresetOptions;
+    private accountFreeChatGroups;
+    /** 账号生效的话题命名策略：显式账号策略 ?? 插件全局策略 ?? once。 */
+    private accountTopicMode;
+    /** 插件级话题命名默认值；绑定新账号时客户端据此展示继承后的有效策略。 */
+    topicNamingDefault(): TopicMode;
     private accountEngineConfig;
     /** 分段间隔区间：账号设置优先，其次插件配置，最后回落到 1–2 秒；上下界颠倒时自动对调。 */
     private segmentDelayRange;
     /** 分段回复的系统提示说明；未绑定或该账号没开启时返回空串，由引擎判断。 */
     segmentInstructionForSession(sessionId: string): string;
+    /** A live reply binding, not a claim that the current input was received over IM. */
+    replyChannelInstructionForSession(sessionId: string): string;
     pendingRequests(): Array<PendingRequest & {
         channelId: string;
     }>;
@@ -252,5 +298,6 @@ export declare class ChannelManager {
     private requestAuthorization;
     private flush;
 }
+export declare function pairingSettings(input?: Record<string, unknown>): Record<string, string>;
 export {};
 //# sourceMappingURL=manager.d.ts.map
