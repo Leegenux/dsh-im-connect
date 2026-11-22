@@ -742,6 +742,28 @@ export class ImEngine {
     }
   }
 
+  private async waitForImagePromptController(signal: AbortSignal): Promise<{
+    prompt(request: { requestId: string; sessionId: string; mode: SendMode; content: Array<Record<string, unknown>> }, signal: AbortSignal): Promise<unknown>
+  } | undefined> {
+    const deadline = Date.now() + 5_000
+    while (!signal.aborted) {
+      const controller = (this.ctx as unknown as { get(name: string): unknown }).get('sessionController') as {
+        prompt(request: { requestId: string; sessionId: string; mode: SendMode; content: Array<Record<string, unknown>> }, signal: AbortSignal): Promise<unknown>
+      } | undefined
+      if (controller?.prompt) return controller
+      const remaining = deadline - Date.now()
+      if (remaining <= 0) return undefined
+      await new Promise<void>(resolve => {
+        const timer = setTimeout(resolve, Math.min(100, remaining))
+        signal.addEventListener('abort', () => {
+          clearTimeout(timer)
+          resolve()
+        }, { once: true })
+      })
+    }
+    return undefined
+  }
+
   private async inject(channel: ChannelAdapter, msg: ImMessage, sources: ImMessage[] = [msg]): Promise<void> {
     if (this.disposed || this.channels.get(channel.id) !== channel) return
     let scope = this.inputScopes.get(channel.id)
@@ -789,10 +811,8 @@ export class ImEngine {
         // model-switch serialization, and durable attachment validation/storage.
         // Optional lookup preserves text-only operation on older Hosts. Keep
         // strict lookup so a pending or unloading provider is never invoked.
-        const controller = (this.ctx as unknown as { get(name: string): unknown }).get('sessionController') as {
-          prompt(request: { requestId: string; sessionId: string; mode: SendMode; content: Array<Record<string, unknown>> }, signal: AbortSignal): Promise<unknown>
-        } | undefined
-        if (!controller?.prompt) throw new ImageInputError('当前 Host 不支持 Chat 图片输入，请升级 DeepSeek Harness。')
+        const controller = await this.waitForImagePromptController(signal)
+        if (!controller) throw new ImageInputError('当前 Host 不支持 Chat 图片输入，请升级 DeepSeek Harness。')
         submitted = true
         await controller.prompt({ requestId, sessionId: binding.sessionId, mode: sendMode, content }, signal)
       } else {
