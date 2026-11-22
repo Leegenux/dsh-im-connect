@@ -126,7 +126,7 @@ def prepare(paths, folder, require_ready=True):
     after['pnpm-lock.yaml'] = transform_lock(before['pnpm-lock.yaml'], paths)
     if 'internal-lock.yaml' in before:
         after['internal-lock.yaml'] = transform_lock(before['internal-lock.yaml'], paths)
-    after['cordis.patch.yml'] = (patch_text.rstrip('\r\n') + '\n- id: im-connect\n  config:\n    updater: false\n    onlineUpdate: false\n').encode()
+    after['cordis.patch.yml'] = patch_text.rstrip('\r\n').encode() + b'\n'
     folder.mkdir(parents=True)
     for stage, content in [('before', before), ('after', after)]:
         for name, data in content.items():
