@@ -58,6 +58,7 @@ test('Telegram 长轮询解析入站消息并在渠道完成分流后提交 offs
     assert.equal(channelContext.chatId, '123')
     assert.equal(channelContext.chatType, 'private')
     assert.equal(channelContext.senderUsername, 'alice')
+    assert.ok(Number.isSafeInteger(channelContext.observedAt))
     // 渠道完成分流（已交给 handler）后提交 offset；这不等于宿主处理完成的持久 ack，崩溃语义见报告边界。
     for (let attempt = 0; attempt < 100; attempt += 1) {
       try {
