@@ -678,7 +678,7 @@ export class ImEngine {
     for (const [part, text] of parts.entries()) {
       if (!allowed()) return
       const deliveryId = createHash('sha256').update(JSON.stringify([id, part])).digest('hex')
-      await this.auditOperation({ sessionId, turnId, requestId: entry.id, deliveryId }, () => channel!.sendWithReceipt!(entry.message.chatId, text))
+      await this.auditOperation({ sessionId, turnId, requestId: entry.id, deliveryId }, async () => { const receipt = await channel!.sendWithReceipt!(entry.message.chatId, text); return { platformMessageId: receipt.platformMessageIds?.length === 1 ? receipt.platformMessageIds[0] : undefined } })
     }
   }
 
@@ -700,7 +700,7 @@ export class ImEngine {
           deliveryId: createHash('sha256').update(JSON.stringify(['replay', current.sessionId, current.turn, current.id, current.offset])).digest('hex'),
           attemptId: crypto.randomUUID(),
         }
-        await this.auditOperation(identity, () => channel.sendWithReceipt!(current.message.chatId, text))
+        await this.auditOperation(identity, async () => { const receipt = await channel.sendWithReceipt!(current.message.chatId, text); return { platformMessageId: receipt.platformMessageIds?.length === 1 ? receipt.platformMessageIds[0] : undefined } })
       } else await channel.send(current.message.chatId, text)
     }, text => splitText(text, Math.max(1, (this.channels.get(entry.channelId)?.maxMessageLength ?? 2000) - 32)), explicit)
   }
@@ -2038,7 +2038,7 @@ export class ImEngine {
       try {
         if (identity && !handedOff) { observe({ ...identity, phase: 'handed_off' }); handedOff = true }
         const receipt = channel.sendWithReceipt ? await channel.sendWithReceipt(chatId, chunk) : (await channel.send(chatId, chunk), undefined)
-        const platformMessageId = receipt?.platformMessageIds?.[0]
+        const platformMessageId = receipt?.platformMessageIds?.length === 1 ? receipt.platformMessageIds[0] : undefined
         if (identity) observe(platformMessageId ? { ...identity, phase: 'result', outcome: 'acknowledged', platformMessageId } : { ...identity, phase: 'result', outcome: 'unknown' })
         return receipt ? { ok: true, receipt } : { ok: true }
       } catch (caught) {

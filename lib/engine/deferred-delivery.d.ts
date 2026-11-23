@@ -28,11 +28,14 @@ export declare function recoverTurn(events: Event[], requestId: string, skipInte
 export declare class DeferredDelivery {
     private readonly file?;
     private entries;
+    private summaries;
     private readonly queue;
     private readonly active;
     private readonly quarantined;
     constructor(file?: string | undefined);
     private flush;
+    /** Record the complete summary before I/O. Existing or uncertain attempts are never retried. */
+    beginSummary(id: string, sessionId: string, turn: number, requestId: string, text: string): boolean;
     list(channelId?: string, message?: ImMessage): DeferredEntry[];
     turnEntries(sessionId: string, turn: number | undefined): DeferredEntry[];
     begin(id: string, sessionId: string, channelId: string, message: ImMessage): void;

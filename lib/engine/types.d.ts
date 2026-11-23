@@ -49,6 +49,10 @@ export interface ReplyStream {
     finish(text: string): Promise<void>;
     /** Platform identifiers confirmed while sending this reply. */
     receipt?(): DeliveryReceipt | undefined;
+    /** Optional evidence for the complete finalized body; missing ID means unconfirmed. */
+    finishWithReceipt?(text: string): Promise<{
+        platformMessageId?: string;
+    }>;
     /** Stop channel-level reuse when taken for finalization, without closing this handle. */
     seal?(): void;
     /** 只改顶部状态行（思考 / 工具进度），不碰正文；渠道不支持时省略。 */
@@ -95,6 +99,13 @@ export interface ChannelAdapter {
         name: string;
         data: Uint8Array;
     }, signal?: AbortSignal): Promise<void>;
+    /** Optional platform receipt for the same file delivery operation. */
+    sendFileWithReceipt?(chatId: string, file: {
+        name: string;
+        data: Uint8Array;
+    }, signal?: AbortSignal): Promise<{
+        platformMessageId?: string;
+    }>;
     setMessageHandler(handler: (msg: ImMessage) => void | Promise<void>): void;
     status(): string;
     /** 使用平台查询或现有连接心跳诊断，不发送聊天消息，也不启动新连接。 */
@@ -137,7 +148,9 @@ export interface ChannelAdapter {
      */
     renameTopic?(chatId: string, name: string): Promise<boolean>;
     /** 订阅平台侧「话题被改名」事件；Telegram 由 forum_topic_edited 服务消息提供。 */
-    setTopicEditHandler?(handler: (chatId: string, name: string) => void): void;
+    setTopicEditHandler?(handler: (chatId: string, name: string, metadata?: {
+        forumGroup: boolean;
+    }) => void | Promise<void>): void;
     /** 企业微信等回调通道不能等合并窗口，必须立刻处理。 */
     skipMerge?: boolean;
     /** 渠道支持的最大思考内容字符预算；未声明时由引擎按默认安全上限（单条 4,096，原生流式 65,536）兜底。 */

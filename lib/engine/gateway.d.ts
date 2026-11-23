@@ -83,6 +83,11 @@ export declare class ImEngine {
     private recordSilentTurn;
     /** 话题名回写状态：默认一个话题只命名一次。 */
     private readonly topicTitles;
+    private readonly topicEditVersions;
+    private readonly topicTitleOutbox;
+    private readonly topicOutboxWorkers;
+    private topicOutboxCursor;
+    private readonly topicOutboxTimer;
     private readonly topicWrites;
     /** 跨插件入口：话题开场白持久化（不投递、不启动回合）。 */
     private readonly topicContextService;
@@ -119,6 +124,7 @@ export declare class ImEngine {
     private rejectUnauthorized;
     private handleInbound;
     private validDelivery;
+    private deliverTurnSummary;
     private recoverDelivery;
     private recoverDeliveries;
     private deliveryCommand;
@@ -175,6 +181,8 @@ export declare class ImEngine {
     private topicMode;
     /** 话题被改名：自己写入的回显忽略，人工改名则锁定。私聊话题不会推送此事件。 */
     private observeTopicEdit;
+    private recoverTopicTitles;
+    private syncTelegramTopicTitle;
     /** /rename 之后把新标题同步到话题名（显式操作，不受 once 限制）。 */
     renameTopicNow(sessionId: string, title: string): Promise<void>;
     /** 正常交付与空回复回合保持安静；仅异常失败结果追加必要文字提示。 */
@@ -204,6 +212,10 @@ export declare class ImEngine {
      * 结果不明的失败（超时、网络中断）立即返回：请求可能已经送达。
      * 等待超过 `deadline` 就放弃，让整条回复的重试开销有上界。
      */
+    private auditIdentity;
+    private observeAudit;
+    /** Observe a single adapter operation without changing its result or retry behavior. */
+    private auditOperation;
     private sendChunk;
     private formatQuestion;
     private deliverQuestionInteraction;
