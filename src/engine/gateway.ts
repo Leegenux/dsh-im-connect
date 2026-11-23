@@ -24,6 +24,7 @@ import { SeenStore } from './seen-store.js'
 import { SessionMapStore } from './session-store.js'
 import { readSessionHistory } from './session-history.js'
 import { TopicTitleStore, clampTopicName, normalizeTopicMode, type TopicMode } from './topic-title.js'
+import { TopicTitleOutbox } from './topic-title-outbox.js'
 import { TopicContextService, type TopicContextHost } from './topic-context.js'
 import { type ChatKind } from './session-id.js'
 import { decideAccess } from './access.js'
@@ -199,6 +200,10 @@ export class ImEngine {
   /** 话题名回写状态：默认一个话题只命名一次。 */
   private readonly topicTitles: TopicTitleStore
   private readonly topicEditVersions = new Map<string, symbol>()
+  private readonly topicTitleOutbox: TopicTitleOutbox
+  private readonly topicOutboxWorkers = new Set<string>()
+  private topicOutboxCursor = 0
+  private readonly topicOutboxTimer: NodeJS.Timeout
   private readonly topicWrites = new KeyedSerialQueue()
   /** 跨插件入口：话题开场白持久化（不投递、不启动回合）。 */
   private readonly topicContextService: TopicContextService
@@ -228,6 +233,9 @@ export class ImEngine {
     private readonly seedableChannel?: (channelId: string) => boolean,
   ) {
     this.topicTitles = new TopicTitleStore(topicTitleFile)
+    this.topicTitleOutbox = new TopicTitleOutbox(topicTitleFile ? `${topicTitleFile}.pending` : undefined)
+    this.topicOutboxTimer = setInterval(() => this.recoverTopicTitles(), 10_000)
+    this.topicOutboxTimer.unref()
     this.deferred = new DeferredDelivery(deliveryFile)
     if (deliveryFile) {
       this.deferredTimer = setInterval(() => { void this.recoverDeliveries() }, 30_000)
@@ -376,6 +384,7 @@ export class ImEngine {
     this.channels.set(channel.id, channel)
     channel.setMessageHandler((msg) => this.enqueue(channel.id, msg))
     channel.setTopicEditHandler?.((chatId, name, metadata) => this.observeTopicEdit(channel, chatId, name, metadata))
+    this.recoverTopicTitles()
   }
 
   unregister(channelId: string): void {
@@ -411,6 +420,7 @@ export class ImEngine {
   dispose(): void {
     this.disposed = true
     this.topicEditVersions.clear()
+    clearInterval(this.topicOutboxTimer)
     this.thinking.dispose()
     if (this.deferredTimer) clearInterval(this.deferredTimer)
     this.recoveryScope.abort()
@@ -1290,7 +1300,7 @@ export class ImEngine {
         // 首条消息的 fallback 标题就是原文（如「在么」），拿它当话题名太糙；
         // 真正命名留给紧随其后的 provider 标题。
         const source = (event.data as { source?: { kind?: string; origin?: string } })?.source
-        if (source?.kind !== 'fallback' && source?.origin !== 'telegram' && source?.kind !== 'telegram') {
+        if (source?.kind !== 'fallback' && source?.origin !== 'telegram') {
           void this.syncTopicName(sessionId, title.title)
         }
       }
@@ -1641,37 +1651,80 @@ export class ImEngine {
       const previous = this.topicTitles.get(key)
       const result = this.topicTitles.observeEdit(key, name)
       if (result === 'frozen') this.log(`[${channelId}] 话题已被人工改名，后续不再自动同步：${name}`)
-      const retry = result === 'self' && previous?.frozenAt && previous.name === clampTopicName(name) && !this.topicEditVersions.has(key)
-      if ((result === 'frozen' || retry) && metadata?.forumGroup && /^-?\d+:[1-9]\d*$/.test(chatId)
-        && this.router.lookup(channelId, 'group', chatId)) {
-        const version = Symbol()
-        this.topicEditVersions.set(key, version)
-        void this.syncTelegramTopicTitle(channel, chatId, name, version).catch(error => {
-          this.log(`[${channelId}] 会话标题同步失败: ${error instanceof Error ? error.message : String(error)}`)
-        }).finally(() => {
-          if (this.topicEditVersions.get(key) === version) this.topicEditVersions.delete(key)
-        })
+      const retry = result === 'self' && previous?.frozenAt && previous.name === clampTopicName(name)
+      const binding = this.router.lookup(channelId, 'group', chatId)
+      if ((result === 'frozen' || retry) && metadata?.forumGroup && /^-?\d+:[1-9]\d*$/.test(chatId) && binding) {
+        const existing = this.topicTitleOutbox.get(key)
+        if (!existing || existing.sessionId !== binding.sessionId || existing.name !== name) {
+          this.topicTitleOutbox.put(key, { channelId, chatId, sessionId: binding.sessionId, name })
+        }
+        this.recoverTopicTitles()
       }
     } catch (error) {
       this.log(`[${channelId}] 话题改名事件处理失败: ${error instanceof Error ? error.message : String(error)}`)
+      throw error
     }
   }
 
-  private async syncTelegramTopicTitle(channel: ChannelAdapter, chatId: string, name: string, version: symbol): Promise<void> {
-    const binding = this.router.lookup(channel.id, 'group', chatId)
-    if (!binding) return
+  private recoverTopicTitles(): void {
+    if (this.disposed) return
+    try {
+      const entries = this.topicTitleOutbox.list()
+      const start = entries.length ? this.topicOutboxCursor % entries.length : 0
+      const ordered = [...entries.slice(start), ...entries.slice(0, start)]
+      this.topicOutboxCursor = entries.length ? (start + 8) % entries.length : 0
+      for (const [key, entry] of ordered) {
+        if (this.topicOutboxWorkers.size >= 8) break
+        if (this.topicOutboxWorkers.has(key) || !this.channels.has(entry.channelId)) continue
+        this.topicOutboxWorkers.add(key)
+        const version = Symbol()
+        this.topicEditVersions.set(key, version)
+        const timeout = setTimeout(() => {
+          if (this.topicEditVersions.get(key) === version) this.topicEditVersions.delete(key)
+          this.log(`[${entry.channelId}] 会话标题同步超时，等待宿主调用结束后重试`)
+        }, 10_000)
+        timeout.unref()
+        void this.syncTelegramTopicTitle(key, entry, version).catch(error => {
+          this.log(`[${entry.channelId}] 会话标题待重试: ${error instanceof Error ? error.message : String(error)}`)
+        }).finally(() => {
+          if (timeout) clearTimeout(timeout)
+          if (this.topicEditVersions.get(key) === version) this.topicEditVersions.delete(key)
+          this.topicOutboxWorkers.delete(key)
+          try {
+            if (this.topicTitleOutbox.get(key)?.id !== entry.id) this.recoverTopicTitles()
+          } catch { /* retry timer reports persistence errors */ }
+        })
+      }
+    } catch (error) {
+      this.log(`[im-topic] 待同步标题不可读: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+
+  private async syncTelegramTopicTitle(key: string, entry: { id: string; channelId: string; chatId: string; sessionId: string; name: string }, version: symbol): Promise<void> {
+    const channel = this.channels.get(entry.channelId)
+    if (!channel) return
+    const current = () => !this.disposed && this.channels.get(entry.channelId) === channel
+      && this.topicEditVersions.get(key) === version
+      && this.router.lookup(entry.channelId, 'group', entry.chatId)?.sessionId === entry.sessionId
+      && this.topicTitleOutbox.get(key)?.id === entry.id
+    if (!current()) {
+      if (this.router.lookup(entry.channelId, 'group', entry.chatId)?.sessionId !== entry.sessionId) this.topicTitleOutbox.remove(key, entry.id)
+      return
+    }
     const host = this.ctx as unknown as { get(name: string): unknown }
-    const sessions = host.get('sessions') as { get?(id: string): unknown } | undefined
-    let session = sessions?.get?.(binding.sessionId)
+    const sessions = host.get('sessions') as { get?(id: string): unknown; flush?(session: unknown): Promise<unknown> } | undefined
+    let session = sessions?.get?.(entry.sessionId)
     if (!session) {
       const controller = host.get('sessionController') as { resolveAgent?(id: string): Promise<{ agent?: { session?: unknown } }> } | undefined
-      session = (await controller?.resolveAgent?.(binding.sessionId))?.agent?.session
+      session = (await controller?.resolveAgent?.(entry.sessionId))?.agent?.session
     }
-    const current = this.router.lookup(channel.id, 'group', chatId)
-    if (!session || this.disposed || this.channels.get(channel.id) !== channel || current?.sessionId !== binding.sessionId
-      || this.topicEditVersions.get(`${channel.id}:${chatId}`) !== version) return
+    if (!current()) return
+    if (!session) throw new Error('session unavailable')
     const titles = host.get('sessionTitle') as { syncTelegramTopicTitle?(session: unknown, title: string): unknown } | undefined
-    titles?.syncTelegramTopicTitle?.(session, name)
+    if (!titles?.syncTelegramTopicTitle || !sessions?.flush) throw new Error('title service or persistence unavailable')
+    titles.syncTelegramTopicTitle(session, entry.name)
+    if (await sessions.flush(session) !== true) throw new Error('title persistence not confirmed')
+    if (current()) this.topicTitleOutbox.remove(key, entry.id)
   }
 
   /** /rename 之后把新标题同步到话题名（显式操作，不受 once 限制）。 */

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -11,6 +11,19 @@ import { SeenStore } from '../lib/engine/seen-store.js'
 const hostRoot = process.env.DSH_TOPIC_TITLE_HOST_ROOT
 const tick = () => new Promise(resolve => setImmediate(resolve))
 
+async function waitForDrain(file) {
+  const deadline = Date.now() + 2_000
+  while (Date.now() < deadline) {
+    try {
+      if (Object.keys(JSON.parse(readFileSync(file, 'utf8'))).length === 0) return
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error
+    }
+    await new Promise(resolve => setTimeout(resolve, 10))
+  }
+  assert.fail('Telegram title sync did not flush and drain its pending record')
+}
+
 // This contract test takes an explicitly selected built host so an older host is never
 // reported as passing the new cross-package behavior.
 test('Telegram topic edits reach the real DSH title projection without launching a turn', {
@@ -18,10 +31,10 @@ test('Telegram topic edits reach the real DSH title projection without launching
 }, async t => {
   const load = relative => import(pathToFileURL(join(hostRoot, relative, 'lib', 'index.js')).href)
   const [{ Context }, { default: SessionStore, KNOWN_SESSION_EVENT_TYPES }, { default: AgentRegistry },
-    { default: ProjectionRegistry }, { default: TitleService }, format] = await Promise.all([
+    { default: ProjectionRegistry }, { default: TitleService }, format, persistence] = await Promise.all([
     load('vendor/cordis'), load('packages/core/session'), load('packages/core/agent'),
     load('packages/session/session-projection'), load('packages/session/session-title'),
-    load('packages/session/session-format-v3-to-v4'),
+    load('packages/session/session-format-v3-to-v4'), load('packages/session/session-persistence-jsonl'),
   ])
   const ctx = new Context()
   await ctx.plugin(SessionStore)
@@ -30,15 +43,27 @@ test('Telegram topic edits reach the real DSH title projection without launching
   await ctx.plugin(TitleService, { fallbackMaxWords: 5, fallbackMaxBytes: 40, maxTitleBytes: 256 })
 
   const dir = mkdtempSync(join(tmpdir(), 'im-topic-title-host-'))
+  let writer
+  let engine
+  t.after(async () => {
+    engine?.dispose()
+    try {
+      await writer?.close()
+      await ctx.fiber.dispose()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+  await ctx.plugin(persistence, { root: join(dir, 'history'), compression: 'none' })
   const session = ctx.sessions.create('im-topic-title-host', { meta: { cwd: dir } })
+  writer = await ctx.sessionPersistence.create(session.header)
   const channelId = 'test-telegram'
   const chatId = '-1002000000000:17'
   const store = new SessionMapStore(join(dir, 'sessions.json'))
   store.upsert(`${channelId}:group:${chatId}`, { sessionId: session.id, channel: channelId, kind: 'group', chatId, title: 'Original', updatedAt: new Date().toISOString() })
-  const engine = new ImEngine(ctx, store, new SeenStore(join(dir, 'seen.json')), {
+  engine = new ImEngine(ctx, store, new SeenStore(join(dir, 'seen.json')), {
     cwd: dir, provider: 'test', model: 'test', agentPreset: '', mergeTimeoutSecs: 1, permissionPreset: '', topicNaming: 'follow',
-  }, () => {})
-  t.after(() => { engine.dispose(); rmSync(dir, { recursive: true, force: true }) })
+  }, () => {}, undefined, undefined, undefined, undefined, undefined, undefined, join(dir, 'topic-titles.json'))
   const outbound = []
   let edited
   engine.register({
@@ -48,7 +73,11 @@ test('Telegram topic edits reach the real DSH title projection without launching
     async renameTopic(_route, title) { outbound.push(title); return true },
   })
   assert.equal(typeof ctx.sessionTitle.syncTelegramTopicTitle, 'function')
-  const edit = async title => { await edited(chatId, title, { forumGroup: true }); await tick() }
+  const edit = async title => {
+    await edited(chatId, title, { forumGroup: true })
+    await waitForDrain(join(dir, 'topic-titles.json.pending'))
+    await tick()
+  }
   await edit('Telegram title one')
   assert.equal(ctx.sessionProjections.snapshot(session).values.title, 'Telegram title one')
   assert.deepEqual(outbound, [])
@@ -57,6 +86,13 @@ test('Telegram topic edits reach the real DSH title projection without launching
   await edit('Telegram title two')
   assert.equal(ctx.sessionProjections.snapshot(session).values.title, 'Telegram title two')
   assert.deepEqual(ctx.sessionTitle.get(session).source, { kind: 'user', origin: 'telegram' })
+  const reader = await ctx.sessionPersistence.open(session.id, 'read')
+  try {
+    const { events } = await reader.read()
+    assert.equal(events.findLast(event => event.type === 'session/title').data.title, 'Telegram title two')
+  } finally {
+    await reader.close()
+  }
   const artifact = {
     header: { version: 4, id: session.id, createdAt: session.header.createdAt, isSeeded: false, delegationDepth: 0, cwd: dir },
     events: session.snapshotEvents(), inheritedEventCount: 0,

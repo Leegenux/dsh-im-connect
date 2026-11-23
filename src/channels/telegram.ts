@@ -274,7 +274,7 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
 
   let handler: ((msg: ImMessage) => void | Promise<void>) | undefined
   /** 话题改名回调；由引擎通过 setTopicEditHandler 注入。 */
-  let onTopicEdited: ((chatId: string, name: string, metadata?: { forumGroup: boolean }) => void) | undefined
+  let onTopicEdited: ((chatId: string, name: string, metadata?: { forumGroup: boolean }) => void | Promise<void>) | undefined
   let offset = persist ? cursorFile.read().offset : 0
   let stopped = false
   let lastError = ''
@@ -908,7 +908,12 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
         const threadId = message.message_thread_id
         const forumGroup = Boolean(message.from) && message.chat.type === 'supergroup' && message.chat.is_forum === true
           && Number.isSafeInteger(threadId) && (threadId ?? 0) > 0 && typeof message.forum_topic_edited.name === 'string'
-        onTopicEdited?.(telegramChatId(message.chat.id, threadId), message.forum_topic_edited.name ?? '', { forumGroup })
+        try {
+          await onTopicEdited?.(telegramChatId(message.chat.id, threadId), message.forum_topic_edited.name ?? '', { forumGroup })
+        } catch (error) {
+          log(`[telegram] 话题改名待重试: ${error instanceof Error ? error.message : String(error)}`)
+          return 'retry'
+        }
       }
       return 'committed'
     }
