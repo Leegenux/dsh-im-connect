@@ -73,6 +73,55 @@ function hangUntilAbort(init) {
   })
 }
 
+test('topic rename is not acknowledged before asynchronous synchronization commits', { timeout: 5000 }, async t => {
+  const f = fixture(t)
+  let release
+  let called = false
+  let polls = 0
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split('/').pop()
+    if (method === 'getMe') return result(BOT)
+    if (method === 'getWebhookInfo') return result({ url: '' })
+    if (method === 'getUpdates') {
+      if (polls++ === 0) return result([{ update_id: 41, message: { message_id: 41, message_thread_id: 20, chat: { id: -123, type: 'supergroup', is_forum: true }, from: { id: 7 }, forum_topic_edited: { name: 'new name' } } }])
+      return hangUntilAbort(init)
+    }
+    throw new Error(`unexpected ${method}`)
+  }
+  const channel = f.channel()
+  channel.setTopicEditHandler(() => { called = true; return new Promise(resolve => { release = resolve }) })
+  await channel.start()
+  await waitFor(() => called)
+  await settle()
+  assert.equal(f.cursor().offset, 0)
+  release()
+  await waitFor(() => f.cursor().offset === 42)
+})
+
+test('failed topic acceptance leaves cursor for a restarted adapter to retry', { timeout: 5000 }, async t => {
+  const f = fixture(t)
+  const update = { update_id: 41, message: { message_id: 41, message_thread_id: 20, chat: { id: -123, type: 'supergroup', is_forum: true }, from: { id: 7 }, forum_topic_edited: { name: 'new' } } }
+  let rejected = false
+  let accepted = false
+  globalThis.fetch = async (url, init) => {
+    const method = String(url).split('/').pop()
+    if (method === 'getMe') return result(BOT)
+    if (method === 'getWebhookInfo') return result({ url: '' })
+    if (method === 'getUpdates') return JSON.parse(init.body).offset < 42 ? result([update]) : hangUntilAbort(init)
+    throw new Error(`unexpected ${method}`)
+  }
+  const first = f.channel()
+  first.setTopicEditHandler(() => { rejected = true; throw new Error('disk failed') })
+  await first.start()
+  await waitFor(() => rejected)
+  await first.stop()
+  assert.equal(f.cursor().offset, 0)
+  const second = f.channel()
+  second.setTopicEditHandler(() => { accepted = true })
+  await second.start()
+  await waitFor(() => accepted && f.cursor().offset === 42)
+})
+
 test('transient getFile failure is retried and the message is delivered exactly once', { timeout: 15000 }, async t => {
   const f = fixture(t)
   const messages = []
