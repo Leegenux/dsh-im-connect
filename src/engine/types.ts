@@ -53,6 +53,8 @@ export interface ReplyStream {
   finish(text: string): Promise<void>
   /** Platform identifiers confirmed while sending this reply. */
   receipt?(): DeliveryReceipt | undefined
+  /** Optional evidence for the complete finalized body; missing ID means unconfirmed. */
+  finishWithReceipt?(text: string): Promise<{ platformMessageId?: string }>
   /** Stop channel-level reuse when taken for finalization, without closing this handle. */
   seal?(): void
   /** 只改顶部状态行（思考 / 工具进度），不碰正文；渠道不支持时省略。 */
