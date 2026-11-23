@@ -515,7 +515,14 @@ export class ChannelManager {
         : supportsProxy(platform) && Boolean(config.proxyUrlRef || config.proxyUrl),
       ...(supportsProxy(platform) && this.proxyUrlCache.has(accountId) ? { proxyUrl: this.proxyUrlCache.get(accountId)! } : {}),
       ...(platform === 'telegram' ? {
-        mentionPolicy: config.mentionPolicy === 'always' ? 'always' : 'addressed',
+        mentionPolicy: config.mentionPolicy === 'always' && (state.freeChatGroups === undefined || config.mentionPolicyExplicit === 'true') ? 'always' : 'addressed',
+      } : {}),
+      ...((platform === 'feishu' || platform === 'lark') ? {
+        thinkingDisplay: config.thinkingDisplay === 'true'
+          ? true
+          : (config.thinkingDisplay === 'false'
+            ? false
+            : (this.engineConfig.thinkingDisplay?.mode === 'collapsed')),
       } : {}),
       ...((platform === 'feishu' || platform === 'lark') ? {
         threadSessions: config.threadSessions === 'true',
@@ -770,7 +777,8 @@ export class ChannelManager {
         register(route: {
           kind: string
           path: string
-          handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void
+          auth: 'required'
+          handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, peer?: { principal: { kind: string } }) => void
         }): (() => void) | void
       }
     }).webServer
@@ -1038,20 +1046,28 @@ export class ChannelManager {
     const dispose = webServer.register({
       kind: 'prefix',
       path: basePath,
-      handler: async (req, res) => {
+      auth: 'required',
+      handler: async (req, res, peer) => {
         try {
-          // 动态读取活动服务，并保留 requestRejection 的 this 绑定。
-          const connection = (typeof ctx.get === 'function' ? ctx.get('connection') : undefined) as {
-            requestRejection?: (request: { headers: typeof req.headers }) => 401 | 403 | undefined
-          } | undefined
-          if (typeof connection?.requestRejection !== 'function') {
-            send(res, 503, { ok: false, error: '宿主认证服务尚未就绪或版本不支持；请稍后重试或升级宿主。 / Retry or upgrade DSH to enable authenticated management.' })
-            return
-          }
-          const rejection = connection.requestRejection(req)
-          if (rejection !== undefined) {
-            send(res, rejection, { ok: false, error: rejection === 401 ? '请先登录 DSH / Sign in to DSH first' : '宿主拒绝此 Host 或跨站请求 / Host or cross-site request forbidden' })
-            return
+          if (peer !== undefined) {
+            if (peer.principal?.kind !== 'owner') {
+              send(res, 403, { ok: false, error: '仅宿主所有者可管理 IM 账号 / Only the host owner can manage IM accounts' })
+              return
+            }
+          } else {
+            // 旧版宿主不传入 Peer，继续使用其认证服务并保留 this 绑定。
+            const connection = (typeof ctx.get === 'function' ? ctx.get('connection') : undefined) as {
+              requestRejection?: (request: { headers: typeof req.headers }) => 401 | 403 | undefined
+            } | undefined
+            if (typeof connection?.requestRejection !== 'function') {
+              send(res, 503, { ok: false, error: '宿主认证服务尚未就绪或版本不支持；请稍后重试或升级宿主。 / Retry or upgrade DSH to enable authenticated management.' })
+              return
+            }
+            const rejection = connection.requestRejection(req)
+            if (rejection !== undefined) {
+              send(res, rejection, { ok: false, error: rejection === 401 ? '请先登录 DSH / Sign in to DSH first' : '宿主拒绝此 Host 或跨站请求 / Host or cross-site request forbidden' })
+              return
+            }
           }
           const requestError = validateApiMutation(req)
           if (requestError) { send(res, requestError.status, { ok: false, error: requestError.error }); return }
@@ -1213,24 +1229,16 @@ export class ChannelManager {
         Object.hasOwn(input, 'mentionPolicy') || Object.hasOwn(input, 'freeChatGroups')
       )
       const previousMentionPolicy = state.config?.mentionPolicy === 'always' ? 'always' : 'addressed'
-      const previousFreeChatGroups = typeof state.config?.freeChatGroups === 'string' ? state.config.freeChatGroups : ''
       const requestedMentionPolicy = input.mentionPolicy === undefined ? previousMentionPolicy : (input.mentionPolicy === 'always' ? 'always' : 'addressed')
-      let requestedFreeChatGroups = previousFreeChatGroups
-      if (input.freeChatGroups !== undefined) {
-        requestedFreeChatGroups = typeof input.freeChatGroups === 'string' ? input.freeChatGroups.trim() : ''
-      }
-      const mentionPolicyChanged = hasMentionPolicySettings && (
-        requestedMentionPolicy !== previousMentionPolicy || requestedFreeChatGroups !== previousFreeChatGroups
-      )
+      const mentionPolicyChanged = hasMentionPolicySettings && requestedMentionPolicy !== previousMentionPolicy
       if (hasMentionPolicySettings) {
         const config = { ...(state.config ?? {}) }
-        if (requestedMentionPolicy === 'always') config.mentionPolicy = 'always'
-        else delete config.mentionPolicy
-        if (requestedFreeChatGroups) config.freeChatGroups = requestedFreeChatGroups
-        else delete config.freeChatGroups
+        if (input.mentionPolicy === 'always') { config.mentionPolicy = 'always'; config.mentionPolicyExplicit = 'true' }
+        else if (input.mentionPolicy !== undefined || input.freeChatGroups !== undefined) { delete config.mentionPolicy; delete config.mentionPolicyExplicit }
+        if (input.freeChatGroups !== undefined) delete config.freeChatGroups
         state.config = config
       }
-      const hasThinkingDisplaySetting = (platform === 'telegram' || platform === 'feishu' || platform === 'lark') && Object.hasOwn(input, 'thinkingDisplay')
+      const hasThinkingDisplaySetting = (platform === 'feishu' || platform === 'lark') && Object.hasOwn(input, 'thinkingDisplay')
       if (hasThinkingDisplaySetting) {
         const config = { ...(state.config ?? {}) }
         if (input.thinkingDisplay === true) config.thinkingDisplay = 'true'
@@ -1269,7 +1277,7 @@ export class ChannelManager {
       }
       this.flush()
       if (reloadSessions) await this.engine.reloadChannel(accountId, { resetSessions })
-      if ((proxyChanged || mentionPolicyChanged || threadSessionsChanged || wecomWsUrlChanged) && this.running.has(accountId)) await this.startOne(accountId)
+      if ((proxyChanged || mentionPolicyChanged || freeChatGroupsChanged || threadSessionsChanged || wecomWsUrlChanged) && this.running.has(accountId)) await this.startOne(accountId)
       return { ok: true, account: this.accountView(accountId, state) }
     })
   }
@@ -1644,7 +1652,7 @@ export class ChannelManager {
     if (platform === 'telegram' && state?.freeChatGroups !== undefined) {
       out.freeChatGroups = this.accountFreeChatGroups(state).join('\n')
       // An explicit list (including []) replaces legacy all-group bypass, never widens it.
-      delete out.mentionPolicy
+      if (state.config?.mentionPolicyExplicit !== 'true') delete out.mentionPolicy
     }
     if (platform === 'weixin') {
       const token = await this.vault.resolve(credentialRef(id, 'botToken'))
@@ -1774,8 +1782,13 @@ export class ChannelManager {
     const permission = normalizePermission(input.permission ?? previous.permission ?? this.currentPermission(), this.permissionPresets().names)
     if (!permission) return { ok: false, error: '请选择权限' }
     const privateAccess = input.privateAccess === 'all' || (input.privateAccess === undefined && previous.privateAccess === 'all') ? 'all' : 'approved'
-    const freeChatGroupsInput = input.freeChatGroups === undefined ? previous.freeChatGroups : input.freeChatGroups
-    const freeChatGroups = freeChatGroupsInput === undefined ? undefined : normalizeFreeChatGroups(freeChatGroupsInput)
+    const freeChatGroupsInput = platform !== 'telegram' && typeof input.freeChatGroups === 'string'
+      ? previous.freeChatGroups
+      : input.freeChatGroups === undefined ? previous.freeChatGroups : input.freeChatGroups
+    const parsedGroups = typeof freeChatGroupsInput === 'string'
+      ? parseChatIdList(freeChatGroupsInput).filter(id => /^-[1-9]\d{0,19}$/.test(id))
+      : freeChatGroupsInput
+    const freeChatGroups = parsedGroups === undefined ? undefined : normalizeFreeChatGroups(parsedGroups)
     if (freeChatGroupsInput !== undefined && freeChatGroups === undefined) return { ok: false, error: '群聊免 @ 配置无效：请填写最多 100 个负整数 Telegram 群 ID' }
     const thinkingDisplayMode = input.thinkingDisplayMode === undefined ? previous.thinkingDisplayMode : input.thinkingDisplayMode
     if (thinkingDisplayMode !== undefined && thinkingDisplayMode !== 'off' && thinkingDisplayMode !== 'collapsed') return { ok: false, error: '思考过程展示模式无效' }
@@ -1887,7 +1900,9 @@ export class ChannelManager {
       segmentDelayMinSecs: this.segmentDelayRange(state).min,
       segmentDelayMaxSecs: this.segmentDelayRange(state).max,
       sessionIdleMinutes: normalizeIdleMinutes(state.sessionIdleMinutes) ?? 0,
-      thinkingDisplay: state.config?.thinkingDisplay === 'true'
+      thinkingDisplay: this.platformOf(accountId, state) === 'telegram'
+        ? { ...this.engineConfig.thinkingDisplay, mode: 'off' }
+        : state.config?.thinkingDisplay === 'true'
         ? { ...this.engineConfig.thinkingDisplay, mode: 'collapsed' }
         : (state.config?.thinkingDisplay === 'false'
           ? { ...this.engineConfig.thinkingDisplay, mode: 'off' }

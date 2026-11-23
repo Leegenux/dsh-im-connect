@@ -98,7 +98,7 @@ test('ChannelManager 反显、保存与更新 Telegram 群聊触发策略', asyn
   // 1. 初始状态：未配置时默认 addressed，freeChatGroups 为空字符串
   let account = manager.list().flatMap(c => c.accounts).find(a => a.id === created.accountId)
   assert.equal(account.mentionPolicy, 'addressed')
-  assert.equal(account.freeChatGroups, '')
+  assert.deepEqual(account.freeChatGroups, [])
 
   // 2. 更新为指定群免 @
   let saved = await manager.updateAccount(created.accountId, {
@@ -107,7 +107,7 @@ test('ChannelManager 反显、保存与更新 Telegram 群聊触发策略', asyn
   })
   assert.equal(saved.ok, true)
   assert.equal(saved.account.mentionPolicy, 'addressed')
-  assert.equal(saved.account.freeChatGroups, '-1001234567890, -5496760438')
+  assert.deepEqual(saved.account.freeChatGroups, ['-1001234567890', '-5496760438'])
 
   // 3. 更新为所有群均免 @
   saved = await manager.updateAccount(created.accountId, {
@@ -116,7 +116,8 @@ test('ChannelManager 反显、保存与更新 Telegram 群聊触发策略', asyn
   })
   assert.equal(saved.ok, true)
   assert.equal(saved.account.mentionPolicy, 'always')
-  assert.equal(saved.account.freeChatGroups, '')
+  assert.deepEqual(saved.account.freeChatGroups, [])
+  assert.equal((await manager.resolveSecrets('telegram', created.accountId, manager.store.channels[created.accountId].config)).mentionPolicy, 'always')
 
   // 4. 切回默认 addressed 且清明白名单
   saved = await manager.updateAccount(created.accountId, {
@@ -125,16 +126,29 @@ test('ChannelManager 反显、保存与更新 Telegram 群聊触发策略', asyn
   })
   assert.equal(saved.ok, true)
   assert.equal(saved.account.mentionPolicy, 'addressed')
-  assert.equal(saved.account.freeChatGroups, '')
+  assert.deepEqual(saved.account.freeChatGroups, [])
 
-  // 5. 测试 thinkingDisplay 开关保存与反显
-  assert.equal(saved.account.thinkingDisplay, false, '默认未开启思考展示')
+  // Production array input remains canonical and overrides any legacy all-groups setting.
+  manager.store.channels[created.accountId].config.mentionPolicy = 'always'
+  delete manager.store.channels[created.accountId].config.mentionPolicyExplicit
+  saved = await manager.updateAccount(created.accountId, { freeChatGroups: ['-100456'] })
+  assert.equal(saved.ok, true)
+  assert.deepEqual(saved.account.freeChatGroups, ['-100456'])
+  let effective = await manager.resolveSecrets('telegram', created.accountId, manager.store.channels[created.accountId].config)
+  assert.equal(effective.mentionPolicy, undefined)
+  assert.equal(effective.freeChatGroups, '-100456')
+  assert.equal((await manager.updateAccount(created.accountId, { freeChatGroups: ['invalid'] })).ok, false)
+  // String imports never widen access to a positive/user ID.
+  saved = await manager.updateAccount(created.accountId, { freeChatGroups: '-100789, 123' })
+  assert.deepEqual(saved.account.freeChatGroups, ['-100789'])
+  // Legacy account and global settings cannot enable Telegram reasoning.
+  manager.engineConfig.thinkingDisplay = { mode: 'collapsed' }
+  manager.store.channels[created.accountId].config.thinkingDisplay = 'true'
+  assert.equal(manager.accountEngineConfig(created.accountId).thinkingDisplay.mode, 'off')
   saved = await manager.updateAccount(created.accountId, { thinkingDisplay: true })
   assert.equal(saved.ok, true)
-  assert.equal(saved.account.thinkingDisplay, true, '更新后反显 thinkingDisplay 为 true')
-  saved = await manager.updateAccount(created.accountId, { thinkingDisplay: false })
-  assert.equal(saved.ok, true)
-  assert.equal(saved.account.thinkingDisplay, false, '关闭后反显 thinkingDisplay 为 false')
+  assert.equal(saved.account.thinkingDisplay, undefined)
+  assert.equal(manager.accountEngineConfig(created.accountId).thinkingDisplay.mode, 'off')
 })
 
 test('运行中的 Telegram 账号在群聊策略变更时会触发 startOne 重启', async t => {
@@ -177,7 +191,7 @@ test('非 Telegram 账号忽略群聊触发策略配置', async t => {
   })
   assert.equal(saved.ok, true)
   assert.equal(saved.account.mentionPolicy, undefined)
-  assert.equal(saved.account.freeChatGroups, undefined)
+  assert.deepEqual(saved.account.freeChatGroups, [])
 })
 
 test('Telegram 群聊策略仅在 Telegram 设置中渲染，支持三态、群号输入与格式警告', () => {
@@ -191,7 +205,7 @@ test('Telegram 群聊策略仅在 Telegram 设置中渲染，支持三态、群�
   assert.match(inspector, /value: "addressed"/)
   assert.match(inspector, /value: "custom"/)
   assert.match(inspector, /value: "always"/)
-  assert.match(inspector, /thinkingDisplaySupported:\s*account\.platform === "telegram"/)
+  assert.match(inspector, /thinkingDisplaySupported:\s*account\.platform === "feishu" \|\| account\.platform === "lark"/)
   assert.match(inspector, /account\.assistant\.reasoningEffort,\s*account\.thinkingDisplay\]/)
 
   const picker = client.slice(client.indexOf('function AccountSettingsPicker'), client.indexOf('function AccountInspector'))

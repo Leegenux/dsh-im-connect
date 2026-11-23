@@ -374,7 +374,7 @@ test('turn/end 的错误诊断会透传到 onComplete', async t => {
   assert.equal(notices.length, 1)
   assert.equal(notices[0].status, 'error')
   assert.equal(notices[0].reasonKind, 'error')
-   assert.equal(notices[0].errorMessage, 'Encountered invalidated oauth token for user')
+  assert.equal(notices[0].errorDetail, 'Encountered invalidated oauth token for user')
 })
 
 test('max-tokens 回合的消息状态显示已结束，不显示已取消', async t => {
