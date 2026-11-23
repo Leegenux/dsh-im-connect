@@ -457,6 +457,23 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
     return Number.isSafeInteger(sent?.message_id) ? sent.message_id : undefined
   }
 
+  async function sendDocument(chatId: string, file: { name: string; data: Uint8Array }, signal?: AbortSignal): Promise<{ platformMessageId?: string }> {
+    if (stopped) throw new DOMException('Telegram channel stopped', 'AbortError')
+    const route = parseTelegramChatId(chatId)
+    const result = await retryTelegram(async attemptSignal => {
+      if (stopped) throw new DOMException('Telegram channel stopped', 'AbortError')
+      checkCooldown(route.chatId)
+      const form = fileForm(file, 'document')
+      form.append('chat_id', String(route.chatId))
+      if (route.threadId !== undefined) form.append('message_thread_id', String(route.threadId))
+      const res = await fetchTelegram(`${API}/bot${token}/sendDocument`, {
+        method: 'POST', body: form, redirect: 'error', signal: attemptSignal,
+      })
+      return readApiResult('sendDocument', res, route.chatId)
+    }, { signal: AbortSignal.any([...(signal ? [signal] : []), ...(lifecycle ? [lifecycle.signal] : [])]), budgetMs: 120_000, method: 'sendDocument', log })
+    return receipt(result)
+  }
+
   async function readApiResult<T>(method: string, res: Response, chatId: unknown, noteRateLimit = true): Promise<T> {
     // Gateways may return HTML on transient HTTP failures; do not lose the status to JSON parsing.
     if (res.status >= 500 || [408, 425].includes(res.status)) {
@@ -1162,23 +1179,8 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
       const messageId = await sendMessageText(chatId, text)
       return messageId === undefined ? {} : { platformMessageIds: [String(messageId)] }
     },
-    async sendFile(chatId, file, signal) {
-      if (stopped) throw new DOMException('Telegram channel stopped', 'AbortError')
-      const route = parseTelegramChatId(chatId)
-      await retryTelegram(async attemptSignal => {
-        if (stopped) throw new DOMException('Telegram channel stopped', 'AbortError')
-        checkCooldown(route.chatId)
-        // Multipart bodies are recreated for each upload attempt; never reuse a consumed body.
-        const form = fileForm(file, 'document')
-        form.append('chat_id', String(route.chatId))
-        if (route.threadId !== undefined) form.append('message_thread_id', String(route.threadId))
-        const res = await fetchTelegram(`${API}/bot${token}/sendDocument`, {
-          // Preserve the original upload allowance; the shared signal already bounds all attempts.
-          method: 'POST', body: form, redirect: 'error', signal: attemptSignal,
-        })
-        await readApiResult('sendDocument', res, route.chatId)
-      }, { signal: AbortSignal.any([...(signal ? [signal] : []), ...(lifecycle ? [lifecycle.signal] : [])]), budgetMs: 120_000, method: 'sendDocument', log })
-    },
+    async sendFile(chatId, file, signal) { await sendDocument(chatId, file, signal) },
+    async sendFileWithReceipt(chatId, file, signal) { return sendDocument(chatId, file, signal) },
     /**
      * 把会话标题写成话题名。只有论坛话题（话题群 / 私聊话题）有这一层级；
      * 普通私聊与未开启话题的群没有话题名，返回 false 让调用方跳过。
