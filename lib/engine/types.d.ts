@@ -153,6 +153,8 @@ export interface ChannelAdapter {
     }) => void | Promise<void>): void;
     /** 企业微信等回调通道不能等合并窗口，必须立刻处理。 */
     skipMerge?: boolean;
+    /** 渠道支持的最大思考内容字符预算；未声明时由引擎按默认安全上限（单条 4,096，原生流式 65,536）兜底。 */
+    maxThinkingChars?: number;
     /**
      * 把模型的思考过程发成一条可在聊天里折叠/展开的消息（近似网页里收起的思考行）。
      *
@@ -163,6 +165,10 @@ export interface ChannelAdapter {
     /** 支持最新片段预览和只读展开按钮；不具备此能力的渠道保持既有前缀策略。 */
     readonly thinkingPreview?: 'latest';
 }
+/** 思考过程截断提示语（基础文案）。 */
+export declare const DEFAULT_TRUNCATED_NOTE = "\u2026\uFF08\u5DF2\u622A\u65AD\uFF0C\u5B8C\u6574\u5185\u5BB9\u89C1\u7F51\u9875\u4F1A\u8BDD\uFF09";
+/** 思考过程单条消息的默认最大字符预算（普通单条消息渠道如 Telegram 适用）。 */
+export declare const DEFAULT_THINKING_MAX_CHARS = 3500;
 /** 思考过程消息的渲染参数；标题由引擎按宿主语言生成。 */
 export interface ThinkingOptions {
     /** 本次输出的唯一身份；引擎为每个会话回合生成，不得跨回合复用。 */

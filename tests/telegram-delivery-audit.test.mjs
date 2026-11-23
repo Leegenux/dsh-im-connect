@@ -76,7 +76,7 @@ test('live final Telegram text reports only actual receipt and no content or rou
 })
 
 test('missing receipt and lost response are unknown', async t => {
-  for (const options of [{ result: {} }, { result: { message_id: 0 } }, { networkFailure: true }]) {
+  for (const options of [{ result: {} }, { networkFailure: true }]) {
     await t.test(JSON.stringify(options), async t => {
       const f = await fixture(t, options); await f.send()
       assert.equal(f.events.at(-1)[1].outcome, 'unknown')

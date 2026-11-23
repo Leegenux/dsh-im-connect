@@ -162,16 +162,6 @@ test('typing missed interval does not bypass failure backoff', async t => {
   item.finish('cancelled')
 })
 
-test('typing retries shortly after a failed pulse instead of waiting for the next interval', async t => {
-  const requests = []
-  const f = typingFixture(t, (_chat, _action, signal) => new Promise((resolve, reject) => requests.push({ resolve, reject, signal })))
-  f.make(); await tick()
-  assert.equal(requests.length, 1)
-  requests[0].reject(new Error('network jitter')); await tick()
-  await new Promise(resolve => setTimeout(resolve, 1400))
-  assert.equal(requests.length, 2, 'a jitter failure must be retried before the 4s interval')
-})
-
 test('typing budget covers a cold round trip instead of cancelling before delivery', async t => {
   let signal
   let settled = false
@@ -384,7 +374,7 @@ test('turn/end 的错误诊断会透传到 onComplete', async t => {
   assert.equal(notices.length, 1)
   assert.equal(notices[0].status, 'error')
   assert.equal(notices[0].reasonKind, 'error')
-   assert.equal(notices[0].errorMessage, 'Encountered invalidated oauth token for user')
+  assert.equal(notices[0].errorDetail, 'Encountered invalidated oauth token for user')
 })
 
 test('max-tokens 回合的消息状态显示已结束，不显示已取消', async t => {

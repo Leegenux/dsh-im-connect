@@ -9,7 +9,7 @@ import { readFileSync } from 'node:fs'
 import { basename } from 'node:path'
 import { backupCorruptFileSync, writeFileAtomicSync } from '../engine/atomic-file.js'
 import { JsonStateFile } from '../engine/json-state.js'
-import { sleepWithSignal, timeoutSignal } from '../engine/abort.js'
+import { fileOperation, sleepWithSignal, timeoutSignal } from '../engine/abort.js'
 import { fileMedia, imageMedia, MAX_CHANNEL_IMAGE_BYTES } from './channel-image-download.js'
 import { isTelegramTransient, retryTelegram } from './telegram-retry.js'
 import { isInboundAddressed, type MentionPolicy } from './mention-policy.js'
@@ -72,23 +72,7 @@ interface TgUpdate {
 }
 
 const API = 'https://api.telegram.org'
-
-/** 相册成员可能在后续批次里才拿到 @/回复触发；这段时间内保持待投递，并随渠道重启恢复。 */
-const ALBUM_TTL_MS = 30_000
-/** 入站图片是幂等 GET：单次网络抖动不应让整条消息消失，按短退避重试。 */
-const MEDIA_RETRY_DELAYS_MS = [500, 1500, 3000] as const
-
-interface AlbumEntry {
-  expires: number
-  addressed: boolean
-  pending: TgUpdate[]
-  /** 唯一 update_id（跨重试/start-stop/重启稳定），旧格式由 pending 推导。 */
-  ids: number[]
-}
-interface PersistedAlbums {
-  version: 1
-  albums: Record<string, AlbumEntry>
-}
+const POLL_REQUEST_TIMEOUT_MS = 35_000
 
 /**
  * 状态表情的总预算。冷连接（刚启动、连接被平台关掉之后）的 TLS 握手 + 请求
@@ -111,9 +95,28 @@ const STATUS_REACTION_DELAYS_MS = [400, 1200] as const
  * 放宽到 6 秒仍然有界，不会堆积请求。
  */
 const TYPING_REQUEST_TIMEOUT_MS = 6000
+
 function isTerminalStatus(state: string): boolean {
   return state === 'success' || state === 'ended' || state === 'error' || state === 'cancelled'
 }
+
+/** 相册成员可能在后续批次里才拿到 @/回复触发；这段时间内保持待投递，并随渠道重启恢复。 */
+const ALBUM_TTL_MS = 30_000
+/** 入站图片是幂等 GET：单次网络抖动不应让整条消息消失，按短退避重试。 */
+const MEDIA_RETRY_DELAYS_MS = [500, 1500, 3000] as const
+
+interface AlbumEntry {
+  expires: number
+  addressed: boolean
+  pending: TgUpdate[]
+  /** 唯一 update_id（跨重试/start-stop/重启稳定），旧格式由 pending 推导。 */
+  ids: number[]
+}
+interface PersistedAlbums {
+  version: 1
+  albums: Record<string, AlbumEntry>
+}
+
 
 /**
  * 编码 Telegram 会话键：
@@ -442,7 +445,7 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
     if (markdown !== undefined) {
       try {
         const sent = await api<{ message_id?: number }>('sendRichMessage', { chat_id: route.chatId, ...threadParam, rich_message: { markdown } })
-        return Number.isSafeInteger(sent?.message_id) && sent!.message_id! > 0 ? sent.message_id : undefined
+        return Number.isSafeInteger(sent?.message_id) ? sent.message_id : undefined
       } catch (error) {
         // Transport retries already ran; do not restart their budget by switching formats.
         if ((error as { rejected?: boolean })?.rejected !== true) throw error
@@ -453,7 +456,7 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
       }
     }
     const sent = await api<{ message_id?: number }>('sendMessage', { chat_id: route.chatId, ...threadParam, text })
-    return Number.isSafeInteger(sent?.message_id) && sent!.message_id! > 0 ? sent.message_id : undefined
+    return Number.isSafeInteger(sent?.message_id) ? sent.message_id : undefined
   }
 
   async function sendDocument(chatId: string, file: { name: string; data: Uint8Array }, signal?: AbortSignal): Promise<{ platformMessageId?: string }> {
@@ -1050,11 +1053,15 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
     while (!stopped && epoch === pollEpoch) {
       let retry = false
       try {
-        const updates = await api<TgUpdate[]>('getUpdates', {
+        // Bound the complete fetch + JSON await even if a transport ignores abort.
+        // This attempt-local signal also cancels the request, never its parent lifecycle.
+        // Late results/rejections are observed by fileOperation but cannot reach dispatch.
+        const signal = timeoutSignal(POLL_REQUEST_TIMEOUT_MS, lifecycle?.signal)
+        const updates = await fileOperation(api<TgUpdate[]>('getUpdates', {
           offset,
           timeout: 25,
           allowed_updates: ['message', 'callback_query'],
-        }, 35_000)
+        }, POLL_REQUEST_TIMEOUT_MS, { signal }), signal)
         lastError = ''
         for (const update of updates) {
           if (stopped || epoch !== pollEpoch) return

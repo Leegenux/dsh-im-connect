@@ -18,6 +18,7 @@ import { createFileVault, createServiceVault, credentialRef, type CredentialServ
 import { ImEngine } from './engine/gateway.js'
 import { SeenStore } from './engine/seen-store.js'
 import { clearWeixinLogin, persistWeixinLogin, readLegacyWeixinBotToken, readWeixinAllowedUserId } from './channels/weixin.js'
+import { validateWecomWsUrl } from './channels/wecom.js'
 import { normalizeAssistantModel, normalizePermission, normalizeWorkspacePath, type AssistantModel, type PermissionPreset } from './engine/assistant-settings.js'
 import type { ChannelAdapter, EngineConfig, ImMessage, SendMode } from './engine/types.js'
 import { KeyedSerialQueue } from './engine/keyed-queue.js'
@@ -263,6 +264,9 @@ export interface AccountView {
   proxyMode: ChannelProxyMode
   proxyConfigured: boolean
   proxyUrl?: string
+  mentionPolicy?: 'addressed' | 'always'
+  threadSessions?: boolean
+  wsUrl?: string
   lastCheckedAt?: string
 }
 
@@ -288,6 +292,16 @@ export interface ChannelView {
   total: number
 }
 
+export interface ChannelSessionGroup {
+  /** 兼容期平台标识（供旧客户端按平台聚合），多账号时平台内各账号实例共享；后续大版本迁移后将统一为 accountId */
+  id: string
+  /** 账号唯一实例 ID */
+  accountId: string
+  platform: ChannelId
+  label: string
+  sessions: SessionRecord[]
+}
+
 interface PendingRequest {
   userId: string
   username?: string
@@ -309,7 +323,6 @@ interface Persisted {
   permission?: PermissionPreset
   entryLocation?: EntryLocation
   sidebarEntry?: boolean
-  onlineUpdate?: boolean
   taskTreeSessions?: boolean
 }
 
@@ -339,7 +352,6 @@ export class ChannelManager {
   private readonly log: (line: string) => void
   private readonly ctx: Context
   private readonly engineConfig: EngineConfig
-  private readonly hostUpdateDisabled: boolean
   private store: Persisted = { channels: {}, allowlist: {}, pending: {} }
   private readonly running = new Map<string, ChannelAdapter>()
   private readonly proxyUrlCache = new Map<string, string>()
@@ -354,11 +366,10 @@ export class ChannelManager {
   private readonly reconnectAttempts = new Map<string, number>()
   private readonly starting = new Set<string>()
 
-  constructor(options: { ctx: Context; stateDir: string; log: (line: string) => void; engineConfig: EngineConfig; hostUpdateDisabled?: boolean }) {
+  constructor(options: { ctx: Context; stateDir: string; log: (line: string) => void; engineConfig: EngineConfig }) {
     this.ctx = options.ctx
     this.engineConfig = options.engineConfig
     this.stateDir = options.stateDir
-    this.hostUpdateDisabled = options.hostUpdateDisabled === true
     this.file = join(options.stateDir, 'channels.json')
     this.sessions = new SessionMapStore(join(options.stateDir, 'sessions.json'))
     this.log = options.log
@@ -503,20 +514,93 @@ export class ChannelManager {
         ? this.proxyUrlCache.has(accountId)
         : supportsProxy(platform) && Boolean(config.proxyUrlRef || config.proxyUrl),
       ...(supportsProxy(platform) && this.proxyUrlCache.has(accountId) ? { proxyUrl: this.proxyUrlCache.get(accountId)! } : {}),
+      ...(platform === 'telegram' ? {
+        mentionPolicy: config.mentionPolicy === 'always' && (state.freeChatGroups === undefined || config.mentionPolicyExplicit === 'true') ? 'always' : 'addressed',
+      } : {}),
+      ...((platform === 'feishu' || platform === 'lark') ? {
+        thinkingDisplay: config.thinkingDisplay === 'true'
+          ? true
+          : (config.thinkingDisplay === 'false'
+            ? false
+            : (this.engineConfig.thinkingDisplay?.mode === 'collapsed')),
+      } : {}),
+      ...((platform === 'feishu' || platform === 'lark') ? {
+        threadSessions: config.threadSessions === 'true',
+      } : {}),
+      ...(platform === 'wecom' && config.wsUrl ? {
+        wsUrl: config.wsUrl,
+      } : {}),
       lastCheckedAt: state.lastCheckedAt,
     }
   }
 
-  channelSessions() {
-    const groups = new Map(CHANNEL_ORDER.map(id => [id, {
-      id,
-      label: CHANNEL_META[id].label,
-      sessions: [] as SessionRecord[],
-    }]))
-    for (const item of this.sessions.list()) {
-      groups.get(this.platformOf(item.channel, this.store.channels[item.channel]))?.sessions.push(item)
+  accountGroupLabel(accountId: string, state: ChannelState | undefined, multiAccount: boolean): string {
+    const platform = this.platformOf(accountId, state)
+    const platformLabel = CHANNEL_META[platform]?.label ?? platform
+    if (!multiAccount) return platformLabel
+    if (state && typeof this.accountView === 'function') {
+      try {
+        const view = this.accountView(accountId, state)
+        if (!view.autoName && view.name) {
+          return `${platformLabel} · ${view.name}`
+        }
+        if (view.nameOrdinal) {
+          return `${platformLabel} · #${view.nameOrdinal}`
+        }
+      } catch {
+        // fallback below
+      }
     }
-    return [...groups.values()].filter((group) => group.sessions.length > 0)
+    const rawName = state?.name?.trim()
+    if (rawName) return `${platformLabel} · ${rawName}`
+    return `${platformLabel} · ${accountId}`
+  }
+
+  channelSessions(): ChannelSessionGroup[] {
+    const channelStore = this.store.channels
+    const platformAccounts = new Map<ChannelId, string[]>()
+    for (const [accountId, state] of Object.entries(channelStore)) {
+      const platform = this.platformOf(accountId, state)
+      const list = platformAccounts.get(platform) ?? []
+      list.push(accountId)
+      platformAccounts.set(platform, list)
+    }
+
+    const accountGroups = new Map<string, ChannelSessionGroup>()
+    for (const platform of CHANNEL_ORDER) {
+      const accounts = platformAccounts.get(platform) ?? []
+      const isMulti = accounts.length > 1
+      for (const accountId of accounts) {
+        const state = channelStore[accountId]
+        accountGroups.set(accountId, {
+          id: platform,
+          accountId,
+          platform,
+          label: this.accountGroupLabel(accountId, state, isMulti),
+          sessions: [],
+        })
+      }
+    }
+
+    for (const item of this.sessions.list()) {
+      const accountId = item.channel
+      let group = accountGroups.get(accountId)
+      if (!group) {
+        const platform = this.platformOf(accountId, channelStore[accountId])
+        const platformLabel = CHANNEL_META[platform]?.label ?? platform
+        group = {
+          id: platform,
+          accountId,
+          platform,
+          label: platformLabel,
+          sessions: [],
+        }
+        accountGroups.set(accountId, group)
+      }
+      group.sessions.push(item)
+    }
+
+    return [...accountGroups.values()].filter((group) => group.sessions.length > 0)
   }
 
   async connect(id: ChannelId, config?: Record<string, string>, settings?: Record<string, unknown>): Promise<{ ok: boolean; error?: string; accountId?: string; created?: boolean; newIdentity?: boolean }> {
@@ -537,6 +621,21 @@ export class ChannelManager {
         if (hosts !== undefined) incoming.additionalImageHosts = parseAdditionalImageHosts(hosts).join('\n')
       } catch {
         return { ok: false, error: '图片扩展主机配置无效：请填写精确域名，不要包含通配符、URL、端口或 IP 地址。' }
+      }
+    }
+    if (id === 'wecom' && Object.hasOwn(incoming, 'wsUrl')) {
+      const rawWsUrl = incoming.wsUrl
+      if (rawWsUrl !== undefined) {
+        const trimmed = typeof rawWsUrl === 'string' ? rawWsUrl.trim() : ''
+        if (trimmed) {
+          try {
+            incoming.wsUrl = validateWecomWsUrl(trimmed)!
+          } catch (error) {
+            return { ok: false, error: error instanceof Error ? error.message : String(error) }
+          }
+        } else {
+          delete incoming.wsUrl
+        }
       }
     }
     const normalized = await this.normalizeAccountSettings(id, settings, prev)
@@ -741,32 +840,6 @@ export class ChannelManager {
               return
             }
             send(400, { ok: false, error: '缺少合法的 location 或 enabled 参数' })
-            return
-          }
-          send(405, { ok: false, error: 'method not allowed' })
-          return
-        }
-        if (parts[2] === 'online-update' && parts.length === 3) {
-          if (method === 'GET' || method === 'HEAD') {
-            send(200, method === 'HEAD' ? undefined : {
-              ok: true,
-              enabled: this.isUpdateEnabled(),
-              locked: this.isHostUpdateDisabled(),
-            })
-            return
-          }
-          if (method === 'POST') {
-            if (this.isHostUpdateDisabled()) {
-              send(403, { ok: false, error: '在线更新已被宿主配置锁定禁用' })
-              return
-            }
-            const body = await readBody()
-            if (!body || typeof body.enabled !== 'boolean') {
-              send(400, { ok: false, error: 'enabled 必须是布尔值' })
-              return
-            }
-            const enabled = await this.setOnlineUpdate(body.enabled)
-            send(200, { ok: true, enabled })
             return
           }
           send(405, { ok: false, error: 'method not allowed' })
@@ -1066,22 +1139,6 @@ export class ChannelManager {
     return enabled
   }
 
-  isHostUpdateDisabled(): boolean {
-    return this.hostUpdateDisabled
-  }
-
-  isUpdateEnabled(): boolean {
-    if (this.hostUpdateDisabled) return false
-    return this.store.onlineUpdate !== false
-  }
-
-  async setOnlineUpdate(enabled: boolean): Promise<boolean> {
-    if (typeof enabled !== 'boolean') throw new Error('enabled 必须是布尔值')
-    if (this.hostUpdateDisabled) throw new Error('在线更新已被宿主配置锁定禁用')
-    this.store.onlineUpdate = enabled
-    this.flush()
-    return enabled
-  }
 
   currentAssistant(): AssistantModel | undefined {
     return normalizeAssistantModel(this.store.assistant ?? this.engineConfig)
@@ -1107,6 +1164,7 @@ export class ChannelManager {
           return { ok: false, error: '手动配置代理时必须填写代理地址' }
         }
       }
+      const previousMentionPolicy = state.config?.mentionPolicy === 'always' && (state.freeChatGroups === undefined || state.config?.mentionPolicyExplicit === 'true') ? 'always' : 'addressed'
       const normalized = await this.normalizeAccountSettings(platform, input, state)
       if (!normalized.ok) return normalized
       const freeChatGroupsChanged = platform === 'telegram' && input.freeChatGroups !== undefined
@@ -1168,9 +1226,60 @@ export class ChannelManager {
           this.proxyUrlCache.delete(accountId)
         }
       }
+      const hasMentionPolicySettings = platform === 'telegram' && (
+        Object.hasOwn(input, 'mentionPolicy') || Object.hasOwn(input, 'freeChatGroups')
+      )
+      const requestedMentionPolicy = input.mentionPolicy === undefined
+        ? (input.freeChatGroups !== undefined ? 'addressed' : previousMentionPolicy)
+        : (input.mentionPolicy === 'always' ? 'always' : 'addressed')
+      const mentionPolicyChanged = hasMentionPolicySettings && requestedMentionPolicy !== previousMentionPolicy
+      if (hasMentionPolicySettings) {
+        const config = { ...(state.config ?? {}) }
+        if (input.mentionPolicy === 'always') { config.mentionPolicy = 'always'; config.mentionPolicyExplicit = 'true' }
+        else if (input.mentionPolicy !== undefined || input.freeChatGroups !== undefined) { delete config.mentionPolicy; delete config.mentionPolicyExplicit }
+        if (input.freeChatGroups !== undefined) delete config.freeChatGroups
+        state.config = config
+      }
+      const hasThinkingDisplaySetting = (platform === 'feishu' || platform === 'lark') && Object.hasOwn(input, 'thinkingDisplay')
+      if (hasThinkingDisplaySetting) {
+        const config = { ...(state.config ?? {}) }
+        if (input.thinkingDisplay === true) config.thinkingDisplay = 'true'
+        else if (input.thinkingDisplay === false) config.thinkingDisplay = 'false'
+        else delete config.thinkingDisplay
+        state.config = config
+      }
+      const hasThreadSessionsSetting = (platform === 'feishu' || platform === 'lark') && Object.hasOwn(input, 'threadSessions')
+      let threadSessionsChanged = false
+      if (hasThreadSessionsSetting) {
+        const previousThreadSessions = state.config?.threadSessions === 'true'
+        const requestedThreadSessions = input.threadSessions === true || input.threadSessions === 'true'
+        threadSessionsChanged = requestedThreadSessions !== previousThreadSessions
+        const config = { ...(state.config ?? {}) }
+        if (requestedThreadSessions) config.threadSessions = 'true'
+        else delete config.threadSessions
+        state.config = config
+      }
+      const hasWecomWsUrlSetting = platform === 'wecom' && Object.hasOwn(input, 'wsUrl')
+      let wecomWsUrlChanged = false
+      if (hasWecomWsUrlSetting) {
+        const previousWsUrl = state.config?.wsUrl
+        let nextWsUrl: string | undefined
+        if (typeof input.wsUrl === 'string' && input.wsUrl.trim()) {
+          try {
+            nextWsUrl = validateWecomWsUrl(input.wsUrl)
+          } catch (error) {
+            return { ok: false, error: error instanceof Error ? error.message : String(error) }
+          }
+        }
+        wecomWsUrlChanged = nextWsUrl !== previousWsUrl
+        const config = { ...(state.config ?? {}) }
+        if (nextWsUrl) config.wsUrl = nextWsUrl
+        else delete config.wsUrl
+        state.config = config
+      }
       this.flush()
       if (reloadSessions) await this.engine.reloadChannel(accountId, { resetSessions })
-      if ((proxyChanged || freeChatGroupsChanged) && this.running.has(accountId)) await this.startOne(accountId)
+      if ((proxyChanged || mentionPolicyChanged || freeChatGroupsChanged || threadSessionsChanged || wecomWsUrlChanged) && this.running.has(accountId)) await this.startOne(accountId)
       return { ok: true, account: this.accountView(accountId, state) }
     })
   }
@@ -1545,7 +1654,7 @@ export class ChannelManager {
     if (platform === 'telegram' && state?.freeChatGroups !== undefined) {
       out.freeChatGroups = this.accountFreeChatGroups(state).join('\n')
       // An explicit list (including []) replaces legacy all-group bypass, never widens it.
-      delete out.mentionPolicy
+      if (state.config?.mentionPolicyExplicit !== 'true') delete out.mentionPolicy
     }
     if (platform === 'weixin') {
       const token = await this.vault.resolve(credentialRef(id, 'botToken'))
@@ -1583,7 +1692,6 @@ export class ChannelManager {
         sidebarEntry: typeof parsed.sidebarEntry === 'boolean'
           ? parsed.sidebarEntry
           : (parsed.entryLocation ? parsed.entryLocation !== 'settings' : undefined),
-        onlineUpdate: typeof parsed.onlineUpdate === 'boolean' ? parsed.onlineUpdate : undefined,
         taskTreeSessions: typeof parsed.taskTreeSessions === 'boolean' ? parsed.taskTreeSessions : undefined,
       }
     } catch (error) {
@@ -1676,8 +1784,13 @@ export class ChannelManager {
     const permission = normalizePermission(input.permission ?? previous.permission ?? this.currentPermission(), this.permissionPresets().names)
     if (!permission) return { ok: false, error: '请选择权限' }
     const privateAccess = input.privateAccess === 'all' || (input.privateAccess === undefined && previous.privateAccess === 'all') ? 'all' : 'approved'
-    const freeChatGroupsInput = input.freeChatGroups === undefined ? previous.freeChatGroups : input.freeChatGroups
-    const freeChatGroups = freeChatGroupsInput === undefined ? undefined : normalizeFreeChatGroups(freeChatGroupsInput)
+    const freeChatGroupsInput = platform !== 'telegram' && typeof input.freeChatGroups === 'string'
+      ? previous.freeChatGroups
+      : input.freeChatGroups === undefined ? previous.freeChatGroups : input.freeChatGroups
+    const parsedGroups = typeof freeChatGroupsInput === 'string'
+      ? parseChatIdList(freeChatGroupsInput).filter(id => /^-[1-9]\d{0,19}$/.test(id))
+      : freeChatGroupsInput
+    const freeChatGroups = parsedGroups === undefined ? undefined : normalizeFreeChatGroups(parsedGroups)
     if (freeChatGroupsInput !== undefined && freeChatGroups === undefined) return { ok: false, error: '群聊免 @ 配置无效：请填写最多 100 个负整数 Telegram 群 ID' }
     const thinkingDisplayMode = input.thinkingDisplayMode === undefined ? previous.thinkingDisplayMode : input.thinkingDisplayMode
     if (thinkingDisplayMode !== undefined && thinkingDisplayMode !== 'off' && thinkingDisplayMode !== 'collapsed') return { ok: false, error: '思考过程展示模式无效' }
@@ -1789,6 +1902,13 @@ export class ChannelManager {
       segmentDelayMinSecs: this.segmentDelayRange(state).min,
       segmentDelayMaxSecs: this.segmentDelayRange(state).max,
       sessionIdleMinutes: normalizeIdleMinutes(state.sessionIdleMinutes) ?? 0,
+      thinkingDisplay: this.platformOf(accountId, state) === 'telegram'
+        ? { ...this.engineConfig.thinkingDisplay, mode: 'off' }
+        : state.config?.thinkingDisplay === 'true'
+        ? { ...this.engineConfig.thinkingDisplay, mode: 'collapsed' }
+        : (state.config?.thinkingDisplay === 'false'
+          ? { ...this.engineConfig.thinkingDisplay, mode: 'off' }
+          : this.engineConfig.thinkingDisplay),
     }
   }
 

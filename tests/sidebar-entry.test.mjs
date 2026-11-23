@@ -289,7 +289,6 @@ test('客户端侧边栏入口与 bundle.config 开关槽位生命周期', async
   }
 
   let clientSidebar = false
-  let clientUpdate = true
   let clientTaskTree = false
   let taskTreeChangeEvents = []
   const mockWorkspaces = { create: (input) => ({ id: 'ws-mock-id', ...input }) }
@@ -302,14 +301,6 @@ test('客户端侧边栏入口与 bundle.config 开关槽位生命周期', async
           return { enabled: clientSidebar }
         }
         return { enabled: clientSidebar }
-      }
-      if (path === '/online-update') {
-        if (options?.method === 'POST') {
-          const body = JSON.parse(options.body)
-          clientUpdate = body.enabled
-          return { enabled: clientUpdate }
-        }
-        return { enabled: clientUpdate, locked: false }
       }
       if (path === '/task-tree-sessions') {
         if (options?.method === 'POST') {
@@ -384,16 +375,6 @@ test('客户端侧边栏入口与 bundle.config 开关槽位生命周期', async
   assert.equal(slotRegistrations.has('main'), false, '关闭后注销 main')
   assert.equal(slotRegistrations.has('sidebar.panellist'), false, '关闭后注销 sidebar.panellist')
 
-  // 测试 onlineUpdate 控制
-  assert.equal(controller.isOnlineUpdateEnabled(), true)
-  assert.equal(controller.isOnlineUpdateLocked(), false)
-  await controller.setOnlineUpdate(false)
-  assert.equal(controller.isOnlineUpdateEnabled(), false)
-  assert.equal(clientUpdate, false)
-  await controller.setOnlineUpdate(true)
-  assert.equal(controller.isOnlineUpdateEnabled(), true)
-  assert.equal(clientUpdate, true)
-
   // 测试 taskTreeSessions 控制
   await new Promise((r) => setTimeout(r, 10))
   assert.equal(controller.isTaskTreeSessionsEnabled(), false, 'taskTreeSessions 默认关闭（false）')
@@ -408,20 +389,4 @@ test('客户端侧边栏入口与 bundle.config 开关槽位生命周期', async
   assert.deepEqual(taskTreeChangeEvents, [true, false], '再次触发 onTaskTreeSessionsChange 回调')
 
   controller.destroy()
-
-  // 4. 测试宿主锁定场景（locked: true）
-  const lockedController = setupSidebarEntry(mockCtx, {
-    callApi: async (path) => {
-      if (path === '/sidebar-entry') return { enabled: true }
-      if (path === '/online-update') return { enabled: false, locked: true }
-      return {}
-    },
-    renderPanel: () => null,
-    ns: 'im-connect',
-  })
-  await new Promise((r) => setTimeout(r, 10))
-  assert.equal(lockedController.isOnlineUpdateLocked(), true, '感知宿主锁定状态')
-  await lockedController.setOnlineUpdate(true)
-  assert.equal(lockedController.isOnlineUpdateEnabled(), false, '宿主锁定状态下拒绝开启在线更新')
-  lockedController.destroy()
 })

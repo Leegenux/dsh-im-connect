@@ -48,7 +48,7 @@ test('频道页默认按频道分组，并注入第四个分组选项', () => {
   assert.match(client, /CHANNEL_WORKSPACE_PREFIX = "dsh-im-channel:"/)
   assert.match(client, /function installChannelGroupOption\(/)
   assert.match(client, /setTimeout\(options\.onSelect, 0\)/)
-  assert.match(client, /function channelIconCss\(/)
+  assert.doesNotMatch(client, /function channelIconCss\(/)
   assert.match(client, /data:image\/svg\+xml/)
   assert.match(client, /rail\.byChannel/)
   assert.match(client, /data-mode="channel"/)
@@ -56,7 +56,7 @@ test('频道页默认按频道分组，并注入第四个分组选项', () => {
 })
 
 test('频道组合成工作区保留真实工作区和归档集合', () => {
-  const code = extractBlock(client, '    const CHANNEL_WORKSPACE_PREFIX = "dsh-im-channel:";', '    let channelIconCssValue', '频道合成工作区', [
+  const code = extractBlock(client, '    const CHANNEL_WORKSPACE_PREFIX = "dsh-im-channel:";', '    /** 把 React 元素渲染成可直接注入官方 DOM 的 HTML。 */', '频道合成工作区', [
     'function syntheticChannelWorkspaceState(',
     'function channelRealWorkspaceState(',
   ])
@@ -305,4 +305,118 @@ test('原生侧栏外壳与插入页签都接官方树', () => {
   assert.match(client, /h\(ImSidebarFallbackBoundary, \{ officialTree: tree, hostProps: innerProps \}/)
   assert.match(client, /officialTree: registry\.officialTree/)
   assert.match(client, /h\(ChannelOfficialView, Object\.assign/)
+})
+
+test('向外壳插入频道页签时注入 IM 会话打开器，不直接透传宿主原生 openSession', () => {
+  assert.match(client, /function createImSessionOpener\(/)
+  assert.match(client, /openSession\s*=\s*createImSessionOpener\(registry,\s*hostOpen/)
+  assert.match(client, /openRegisteredSession\(id,\s*registry,\s*hostOpen\)/)
+  assert.match(client, /openListedSession\(resolveHostSessionId\(id,\s*byId\),\s*hostOpen\)/)
+})
+
+test('插入频道页签 render 注入的 openSession 在运行时将行点击路由至 IM 链路', () => {
+  const registeredCalls = []
+  const listedCalls = []
+  const hostCalls = []
+  const fakeRegistry = {
+    officialTree: () => 'tree',
+    sessionOpeners: [{ id: 'im-connect', matchSession: () => true, open: (id, hostOpen) => registeredCalls.push({ id, hostOpen }) }],
+    insert(tab) { this.tab = tab; return () => {} },
+    getTabs() { return [] },
+  }
+  let capturedProps = null
+  const fakeH = (comp, props, child) => {
+    if (child && child.props) capturedProps = child.props
+    return { comp, props, child }
+  }
+  let insertedTabRegistry = null
+  let removeInsertedTab = () => {}
+  let removeInsertedOpener = () => {}
+  let stopInsertedTabLocale = () => {}
+  const clearInsertedTab = () => {}
+
+  const openerCode = extractBlock(client, '    function createImSessionOpener', '    function createNativeTabRegistry', '统一会话打开器')
+  const createImSessionOpener = new Function(
+    'openRegisteredSession', 'openListedSession', 'resolveHostSessionId',
+    `${openerCode}; return createImSessionOpener;`,
+  )(
+    (id, reg, hostOpen) => {
+      const opener = reg.sessionOpeners.find(o => o.id === 'im-connect')
+      if (opener) opener.open(id, hostOpen)
+    },
+    (id, hostOpen) => listedCalls.push({ id, hostOpen }),
+    (id, byId) => (byId && byId[id] && byId[id].id) || id,
+  )
+
+  const code = extractBlock(client, '        const insertChannelTab = (entry) => {', '        const sync = () => {\n          if (syncing) return;', '插入频道页签')
+  const fn = new Function(
+    'findNativeTabRegistry', 'installSessionOpener', 'ensureFilter', 't', 'isChannelSession',
+    'openRegisteredSession', 'openListedSession', 'resolveHostSessionId', 'createImSessionOpener', 'ctx', 'h',
+    'ImSidebarFallbackBoundary', 'ChannelUnavailable', 'ChannelOfficialView',
+    'openChannelSettings', 'openImSettings', 'archiveHostSession', 'unarchiveHostSession',
+    'subscribeLocale', 'subscribeChannelMembership',
+    'insertedTabRegistry', 'clearInsertedTab', 'removeInsertedTab', 'removeInsertedOpener', 'stopInsertedTabLocale',
+    `${code}; return insertChannelTab;`
+  )(
+    () => fakeRegistry,
+    () => () => {},
+    () => {},
+    (key) => key,
+    () => true,
+    (id, reg, hostOpen) => {
+      const opener = reg.sessionOpeners.find(o => o.id === 'im-connect')
+      if (opener) opener.open(id, hostOpen)
+    },
+    (id, hostOpen) => listedCalls.push({ id, hostOpen }),
+    (id) => id,
+    createImSessionOpener,
+    { sessions: { list: { getSnapshot: () => ({ byId: {} }) } } },
+    fakeH,
+    function Boundary() {},
+    function Unavailable() {},
+    function View() {},
+    () => {},
+    () => {},
+    () => {},
+    () => {},
+    () => () => {},
+    () => () => {},
+    insertedTabRegistry, clearInsertedTab, removeInsertedTab, removeInsertedOpener, stopInsertedTabLocale
+  )
+
+  fn({})
+  assert.ok(fakeRegistry.tab, '频道页签已插入')
+  assert.equal(typeof fakeRegistry.tab.render, 'function')
+
+  const hostOpen = (id) => hostCalls.push(id)
+  fakeRegistry.tab.render({ openSession: hostOpen, open: hostOpen })
+  assert.ok(capturedProps, 'ChannelOfficialView 接收到了 props')
+  assert.equal(typeof capturedProps.openSession, 'function')
+  assert.equal(typeof capturedProps.open, 'function')
+
+  // 1. 当存在 im-connect opener 时，点击调用走 openRegisteredSession
+  capturedProps.openSession('im:wx:123')
+  assert.equal(registeredCalls.length, 1)
+  assert.equal(registeredCalls[0].id, 'im:wx:123')
+  assert.equal(registeredCalls[0].hostOpen, hostOpen)
+  assert.equal(hostCalls.length, 0, '未直接透传宿主原生 open')
+
+  // 2. 当注册表中未包含 im-connect opener 时，安全回退到 openListedSession
+  fakeRegistry.sessionOpeners = []
+  capturedProps.openSession('im:wx:456')
+  assert.equal(listedCalls.length, 1)
+  assert.equal(listedCalls[0].id, 'im:wx:456')
+  assert.equal(listedCalls[0].hostOpen, hostOpen)
+  assert.equal(hostCalls.length, 0, '简易注册表下同样走 IM 打开链路')
+
+  // 3. 验证 createImSessionOpener 接收静态对象映射分支（侧栏传参形态）
+  const staticObjectOpener = createImSessionOpener(
+    [],
+    hostOpen,
+    { 'im:wx:789': { id: 'host-session-789' } },
+  )
+  staticObjectOpener('im:wx:789')
+  assert.equal(listedCalls.length, 2)
+  assert.equal(listedCalls[1].id, 'host-session-789')
+  assert.equal(listedCalls[1].hostOpen, hostOpen)
 })

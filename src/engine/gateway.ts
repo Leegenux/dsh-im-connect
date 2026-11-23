@@ -1,13 +1,14 @@
 import { createHash } from 'node:crypto'
 import { DeferredDelivery, DeliveryRejected, DeliveryUnavailable, type DeferredEntry } from './deferred-delivery.js'
+import { readLiveSessionHistory, hasSessionHistoryCapability, type HistorySession } from './session-history.js'
 import { ChoiceSendError } from './choice-delivery.js'
 import { sleepWithSignal } from './abort.js'
 import { ThinkingDisplayTracker, normalizeThinkingDisplay, type ThinkingDisplayTarget } from './thinking-display.js'
-import { assistantText } from './assistant-text.js'
+import { assistantText, isSilentReplyText } from './assistant-text.js'
 import { readDeliveryHistory } from './delivery-history.js'
 import { FileInputError, filePromptParts } from './file-input.js'
 import { ChoiceStore, type Choice } from './choices.js'
-import { MessageProgress, ProgressTracker, type TurnCompletion } from './message-progress.js'
+import { extractErrorDetail, MessageProgress, ProgressTracker, type TurnCompletion } from './message-progress.js'
 import { notice, replyText, withReplyLocale } from './command-locale.js'
 import { FileDelivery, type DeliverySession } from './file-delivery.js'
 import { ChatCommands } from './chat-commands.js'
@@ -118,10 +119,7 @@ interface DeliveryAuditIdentity { sessionId: string; turnId: number; requestId: 
 
 interface AgentLike {
   id?: string
-  session?: {
-    id?: string
-    events?: readonly { type?: string; data?: Record<string, unknown> }[]
-  }
+  session?: HistorySession
 }
 
 interface ApprovalRequestLike {
@@ -169,7 +167,7 @@ export class ImEngine {
   private readonly sessionActors = new Map<string, string>()
   private readonly chatActors = new Map<string, string>()
   private readonly interactionMessageIds = new Map<string, string | undefined>()
-  private readonly questionActors = new Map<string, string>()
+  private readonly questionActors = new Map<string, string | undefined>()
   private readonly questionDeliveries = new Map<string, Promise<InteractionDeliveryResult>>()
   private readonly questionPromptDelivered = new Set<string>()
   private readonly queues = new Map<string, Promise<void>>()
@@ -197,6 +195,17 @@ export class ImEngine {
   private readonly chatCommands: ChatCommands
   private readonly commandScopes = new Map<string, AbortController>()
   private readonly inputScopes = new Map<string, AbortController>()
+  /** 显式声明 NO_REPLY 静默协议的回合，收口时不追加任何通知。 */
+  private readonly silentTurns = new Set<string>()
+
+  private recordSilentTurn(sessionId: string, turn: number | undefined): void {
+    if (turn === undefined) return
+    if (this.silentTurns.size >= 1024) {
+      const oldest = this.silentTurns.values().next().value
+      if (oldest) this.silentTurns.delete(oldest)
+    }
+    this.silentTurns.add(`${sessionId}:${turn}`)
+  }
   /** 话题名回写状态：默认一个话题只命名一次。 */
   private readonly topicTitles: TopicTitleStore
   private readonly topicEditVersions = new Map<string, symbol>()
@@ -556,8 +565,24 @@ export class ImEngine {
         return
       }
       if (binding && this.questions.has(binding.sessionId)) {
-        const actor = this.questionActors.get(binding.sessionId) ?? this.sessionActors.get(binding.sessionId)
-        if (actor && msg.userId !== actor) {
+        const questionActor = this.questionActors.has(binding.sessionId) ? this.questionActors.get(binding.sessionId) : this.sessionActors.get(binding.sessionId)
+        let isAuthorizedActor = false
+        if (questionActor) {
+          isAuthorizedActor = (msg.userId === questionActor)
+        } else {
+          const candidates = new Set<string>()
+          const sessionActor = this.sessionActors.get(binding.sessionId)
+          if (sessionActor) candidates.add(sessionActor)
+          if (kind === 'group') {
+            for (const entry of this.deferred.list(channel.id)) {
+              if (entry.sessionId === binding.sessionId && entry.message.kind === 'group' && entry.message.chatId === msg.chatId && entry.message.userId && !['sent', 'rejected', 'expired'].includes(entry.status)) {
+                candidates.add(entry.message.userId)
+              }
+            }
+          }
+          isAuthorizedActor = candidates.size === 0 || (!!msg.userId && candidates.has(msg.userId))
+        }
+        if (!isAuthorizedActor) {
           await this.deliver(channel, msg.chatId, notice(this.ctx, '只有发起当前任务的用户可以回答这个问题。'))
           return
         }
@@ -626,7 +651,8 @@ export class ImEngine {
     const channel = this.channels.get(entry.channelId)
     if (this.disposed || !channel) return false
     const binding = this.router.lookup(entry.channelId, entry.message.kind ?? 'dm', entry.message.chatId)
-    return binding?.sessionId === entry.sessionId && decideAccess({ userAllowed: this.isAuthorized(entry.channelId, channel, entry.message), kind: entry.message.kind, addressed: true }) === 'allow'
+    return binding?.sessionId === entry.sessionId && (entry.turn === undefined || !this.progress.hasNewerTurn(entry.sessionId, entry.turn))
+      && decideAccess({ userAllowed: this.isAuthorized(entry.channelId, channel, entry.message), kind: entry.message.kind, addressed: true }) === 'allow'
   }
 
   private async deliverTurnSummary(value: unknown): Promise<void> {
@@ -877,10 +903,24 @@ export class ImEngine {
   }
 
   private approvalVerdict(text: string): boolean | undefined {
-    const value = text.trim().toLowerCase()
-    if (['批准', '同意', 'yes', 'y', 'allow'].includes(value)) return true
-    if (['拒绝', '不同意', 'no', 'n', 'reject', 'deny'].includes(value)) return false
-    return undefined
+    const match = (val: string): boolean | undefined => {
+      if (['批准', '同意', 'yes', 'y', 'allow'].includes(val)) return true
+      if (['拒绝', '不同意', 'no', 'n', 'reject', 'deny'].includes(val)) return false
+      return undefined
+    }
+    const direct = match(text.trim().toLowerCase())
+    if (direct !== undefined) return direct
+
+    // 防御性剥离可能的 mention 占位符、@ 前缀及伴随标点（如 "@_user_1 批准"、"@bot 批准"、"<@123> 同意"、"@bot: yes"）
+    const stripped = text
+      .replace(/<@!?\S+?>/g, '')
+      .replace(/@\S+\s+/g, '')
+      .replace(/@([a-zA-Z0-9_.-]+|所有人|全体成员|机器人)/gi, '')
+      .replace(/^[：:,，\s]+/, '')
+      .replace(/[ \t]+/g, ' ')
+      .trim()
+      .toLowerCase()
+    return match(stripped)
   }
 
   private async answerApproval(channelId: string, msg: ImMessage, allow: boolean | undefined): Promise<boolean> {
@@ -963,6 +1003,41 @@ export class ImEngine {
     }, req.signal, () => cancelled)
   }
 
+  private recoverQuestionActor(sessionId: string, session: HistorySession | undefined): { hasHistory: boolean; actor?: string } {
+    if (!hasSessionHistoryCapability(session)) return { hasHistory: false }
+    try {
+      const events = readLiveSessionHistory(session)
+      if (!events) return { hasHistory: true }
+      let turn: number | undefined
+      let ids = new Set<string>()
+      for (const event of events) {
+        if (event.type === 'turn/start') {
+          turn = Number.isSafeInteger(event.data?.turn) ? event.data.turn : undefined
+          ids = new Set()
+        } else if (event.type === 'turn/end' && event.data?.turn === turn) {
+          turn = undefined
+          ids.clear()
+        } else if (turn !== undefined && event.type === 'user/message') {
+          if (typeof event.data?.id === 'string') ids.add(event.data.id)
+          if (typeof event.data?.source?.rpcId === 'string') ids.add(event.data.source.rpcId)
+        }
+      }
+      if (turn === undefined || !ids.size) return { hasHistory: true }
+      const binding = this.router.bindingForSession(sessionId)
+      if (!binding) return { hasHistory: true }
+      const channel = this.channels.get(binding.channelId)
+      if (!channel) return { hasHistory: true }
+      const actors = new Set(this.deferred.list(binding.channelId).filter(entry =>
+        ids.has(entry.id) && entry.sessionId === sessionId && entry.message.kind === binding.kind
+        && entry.message.chatId === binding.chatId && !!entry.message.userId
+        && (entry.turn === undefined || entry.turn === turn)
+        && !['sent', 'rejected', 'expired'].includes(entry.status)
+        && this.isAuthorized(binding.channelId, channel, entry.message) && this.validDelivery(entry),
+      ).map(entry => entry.message.userId!))
+      return { hasHistory: true, actor: actors.size === 1 ? actors.values().next().value : undefined }
+    } catch { return { hasHistory: true } }
+  }
+
   private async onUserQuestions(
     req: UserQuestionRequestLike,
     next: () => Promise<UserQuestionAnswer>,
@@ -980,7 +1055,10 @@ export class ImEngine {
       throw req.signal.reason ?? new DOMException('Aborted', 'AbortError')
     }
     const initialBinding = this.router.bindingForSession(sessionId)
-    const actor = this.sessionActors.get(sessionId) ?? (initialBinding ? this.chatActors.get(`${initialBinding.channelId}:${initialBinding.kind}:${initialBinding.chatId}`) : undefined)
+    const recovered = this.recoverQuestionActor(sessionId, req.agent?.session)
+    const actor = recovered.hasHistory
+      ? (recovered.actor ?? (initialBinding?.kind === 'dm' ? initialBinding.chatId : undefined))
+      : this.sessionActors.get(sessionId) ?? (initialBinding ? this.chatActors.get(`${initialBinding.channelId}:${initialBinding.kind}:${initialBinding.chatId}`) : undefined) ?? (initialBinding?.kind === 'dm' ? initialBinding.chatId : undefined)
     if (actor) this.sessionActors.set(sessionId, actor)
     const typedQuestions = questions as UserQuestionItem[]
     return await this.runInteraction(sessionId, async () => {
@@ -995,7 +1073,7 @@ export class ImEngine {
       // Abort can reject while the prompt send is still in flight; attach the
       // observer now, then await the same promise after presentation completes.
       void wait.catch(() => undefined)
-      if (actor) this.questionActors.set(sessionId, actor)
+      this.questionActors.set(sessionId, actor)
       const resume = this.progress.waiting(sessionId, true)
       try {
         const delivery = await this.retryInteraction(channel, () => this.deliverQuestionInteraction(sessionId, channel, binding.chatId, this.formatQuestion(
@@ -1435,14 +1513,16 @@ export class ImEngine {
       const thinkingFinal = this.thinking.finish(thinkingTarget)
       this.progress.delivery(sessionId, thinkingTurn, thinkingFinal.then(() => undefined))
       this.streamHints.delete(streamKey)
-      const reason = (event.data as { reason?: { kind?: string; error?: { message?: string } } } | undefined)?.reason
+      const reason = (event.data as { reason?: { kind?: string; error?: unknown } } | undefined)?.reason
       this.log(`[${channel.id}] 回合结束 ${sessionId}: ${reason?.kind ?? 'ok'}`)
       if (reason?.kind === 'error' && !trackedEnd) {
-        const detail = reason.error?.message || '模型调用失败'
+        const errorDetail = extractErrorDetail(reason.error)
+        const detail = errorDetail || '模型调用失败'
         this.log(`[${channel.id}] 回合失败 ${sessionId}: ${detail}`)
-        const failed = detail
-           ? `${notice(this.ctx, '助手没有生成回复，请查看本机日志。')}\n\n${detail}`
-           : notice(this.ctx, '助手没有生成回复，请查看本机日志。')
+        const failed = [
+          notice(this.ctx, '助手没有生成回复，请查看本机日志。'),
+          errorDetail ? notice(this.ctx, '原因：{0}', errorDetail) : '',
+        ].filter(Boolean).join('\n\n')
         const taken = await this.streams.take(streamKey, sessionId)
         if (taken.invalidated || !stillDeliverable()) {
           await this.discardEmptyTake(taken)
@@ -1465,6 +1545,10 @@ export class ImEngine {
     if (event.type === 'assistant/message') {
       let stopped = false
       try {
+        if (isSilentReplyText(event.data?.message?.content)) {
+          const turn = (event.data as { turn?: number })?.turn ?? this.observedTurns.get(sessionId)
+          this.recordSilentTurn(sessionId, turn)
+        }
         const text = assistantText(event.data?.message?.content, channel.skipInterimText)
         if (text === undefined) {
           this.log(`[${channel.id}] 跳过含工具调用的中间叙述 ${sessionId}`)
@@ -1735,13 +1819,18 @@ export class ImEngine {
     await this.syncTopicName(sessionId, title, true)
   }
 
-  /** 正常交付保持安静；仅异常结果追加必要文字提示。 */
+  /** 正常交付与空回复回合保持安静；仅异常失败结果追加必要文字提示。 */
   private async notifyCompletion(result: TurnCompletion): Promise<void> {
+    const silentKey = `${result.sessionId}:${result.turn}`
+    const isSilent = this.silentTurns.has(silentKey)
+    if (isSilent) this.silentTurns.delete(silentKey)
     if (result.status === 'completed') return
-    const status = result.status
     const first = result.items[0]
     if (!first) return
     const { channel, message } = first
+    // 显式声明 NO_REPLY 静默协议的回合，收口时不追加任何通知
+    if (result.status === 'empty' && isSilent) return
+    const status = result.status
     const valid = () => {
       const current = this.router.lookup(channel.id, message.kind ?? 'dm', message.chatId)
       return !this.disposed && this.channels.get(channel.id) === channel && current?.sessionId === result.sessionId
@@ -1755,17 +1844,24 @@ export class ImEngine {
     const notified = await withReplyLocale(this.ctx, async () => {
       const summary = ({
         empty: replyText('本次处理已结束，未返回可投递的结果。可补充要求后继续。'),
-        error: replyText('本次处理失败，已返回的内容保留。请查看会话状态，或补充要求后重试。'),
+        error: [
+          replyText('本次处理失败，已返回的内容保留。请查看会话状态，或补充要求后重试。'),
+          result.errorDetail ? replyText('原因：{0}', result.errorDetail) : '',
+        ].filter(Boolean).join('\n\n'),
         cancelled: result.reasonKind === 'max-tokens'
           ? replyText('本次处理已达到输出长度上限，已返回的内容保留。可发送「继续」接续生成。')
           : replyText('本次处理已停止，已返回的内容保留。可直接发消息继续。'),
         'delivery-failed': replyText('本次处理已结束，但部分回复或文件未能发送。查看交付记录：/delivery；完整结果和文件请在网页查看，不会自动重复执行任务。'),
       })[status]
-      const detail = result.status === 'error' && result.errorMessage?.trim() ? result.errorMessage.trim() : ''
-      const text = detail ? `${summary}\n\n${detail}` : summary
+      const text = summary
       if (!valid()) return
-       const noticeId = `completion:${result.sessionId}:${result.turn}:${status}`
-       if (!this.deferred.beginNotice(noticeId, result.sessionId, channel.id, message, text, result.turn)) return
+      const noticeId = `completion:${result.sessionId}:${result.turn}:${status}`
+      try {
+        if (!this.deferred.beginNotice(noticeId, result.sessionId, channel.id, message, text, result.turn)) return
+      } catch (error) {
+        this.log(`[im-delivery] 完成通知记录失败: ${error instanceof Error ? error.message : String(error)}`)
+        return
+      }
       if (result.status === 'error' || result.status === 'cancelled' || result.status === 'empty') {
         for (const entry of this.deferred.list(channel.id, message)) if (entry.sessionId === result.sessionId && entry.turn === result.turn && entry.status === 'waiting') {
           this.deferred.patch(entry.id, { status: 'unknown' })
@@ -1969,7 +2065,7 @@ export class ImEngine {
     let tracked: Promise<InteractionDeliveryResult>
     const current = this.questions.current(sessionId)
     const binding = this.router.bindingForSession(sessionId)
-    const actor = this.questionActors.get(sessionId) ?? this.sessionActors.get(sessionId) ?? (binding ? this.chatActors.get(`${binding.channelId}:${binding.kind}:${binding.chatId}`) : undefined) ?? (binding?.kind === 'dm' ? chatId : undefined)
+    const actor = this.questionActors.has(sessionId) ? this.questionActors.get(sessionId) : this.sessionActors.get(sessionId) ?? (binding ? this.chatActors.get(`${binding.channelId}:${binding.kind}:${binding.chatId}`) : undefined) ?? (binding?.kind === 'dm' ? chatId : undefined)
     const selected = this.questionSelections.get(sessionId) ?? new Set<number>()
     const choices: Choice[] = current?.question.options?.map((option, index) => ({
       label: (current.question.multiSelect && selected.has(index) ? '✓ ' : '') + option.label,

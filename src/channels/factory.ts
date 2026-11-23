@@ -16,7 +16,7 @@ export function createChannelAdapter(
   config: Record<string, string>,
   log: (line: string) => void,
   stateDir: string,
-  options?: { accountId?: string; accountLabel?: string; host?: { get(name: string): unknown }; onWeixinBotToken?: (token: string | undefined) => void | Promise<void> },
+  options?: { accountId?: string; accountLabel?: string; host?: { get(name: string): unknown }; onWeixinBotToken?: (token: string | undefined) => void | Promise<void>; loadFeishuSdk?: () => Promise<typeof import('@larksuiteoapi/node-sdk')> },
 ): ChannelAdapter | undefined {
   let adapter: ChannelAdapter | undefined
   const imageOptions = ['qq', 'wecom', 'dingtalk'].includes(id)
@@ -44,13 +44,13 @@ export function createChannelAdapter(
         proxyUrl: config.proxyUrl,
       }, log); break
     case 'feishu':
-      adapter = createFeishuChannel('feishu', { appId: config.appId, appSecret: config.appSecret, host: options?.host }, log); break
+      adapter = createFeishuChannel('feishu', { appId: config.appId, appSecret: config.appSecret, host: options?.host, threadSessions: config.threadSessions === 'true' }, log, options?.loadFeishuSdk); break
     case 'lark':
-      adapter = createFeishuChannel('lark', { appId: config.appId, appSecret: config.appSecret, domain: 'lark', host: options?.host }, log); break
+      adapter = createFeishuChannel('lark', { appId: config.appId, appSecret: config.appSecret, domain: 'lark', host: options?.host, threadSessions: config.threadSessions === 'true' }, log, options?.loadFeishuSdk); break
     case 'weixin':
       adapter = createWeixinChannel({ enabled: true, stateDir, botToken: config.botToken, onBotToken: options?.onWeixinBotToken, host: options?.host }, log, stateDir); break
     case 'wecom':
-      adapter = createWecomChannel({ botId: config.botId, secret: config.secret, ...imageOptions, host: options?.host }, log); break
+      adapter = createWecomChannel({ botId: config.botId, secret: config.secret, wsUrl: config.wsUrl, ...imageOptions, host: options?.host }, log); break
     case 'dingtalk':
       adapter = createDingtalkChannel({ clientId: config.clientId, clientSecret: config.clientSecret, ...imageOptions, host: options?.host }, log); break
     case 'qq':

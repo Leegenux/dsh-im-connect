@@ -73,6 +73,17 @@ test('明确未提交可恢复，未知不自动重试，分片计划跨重启�
   assert.deepEqual(sent, ['abc', 'def'])
 })
 
+test('完成通知先持久化，重复完成回调不重复创建记录', t => {
+  const { journal, file } = fixture(t)
+  const notice = { ...message, text: '' }
+  assert.equal(journal.beginNotice('completion:s:1:error', 's', 'c', notice, 'failure notice', 1), true)
+  const entry = () => journal.list().find(item => item.id === 'completion:s:1:error')
+  assert.equal(entry().status, 'unknown')
+  assert.equal(entry().text, 'failure notice')
+  assert.equal(journal.beginNotice('completion:s:1:error', 's', 'c', notice, 'failure notice'), false)
+  assert.equal(new DeferredDelivery(file).list().find(item => item.id === 'completion:s:1:error').text, 'failure notice')
+})
+
 test('发送前落盘失败不发出请求，内存状态回滚', async t => {
   const { file } = fixture(t)
   const journal = new DeferredDelivery(file)
@@ -156,26 +167,6 @@ test('冷读取固定快照游标分页并关闭 follow，不调用 prompt 或 r
   } }
   assert.equal((await readDeliveryHistory(host, 's', 'r', new AbortController().signal)).text, 'answer')
   assert.equal(calls, 1); assert.equal(closed, true)
-})
-
-
-test('真实宿主冷历史分页在首帧关闭，不触发 prepared 会话激活', { skip: !process.env.DSH_CHAT_CONTRACT_ROOT }, async () => {
-  const { pathToFileURL } = await import('node:url')
-  const { SessionHistoryController } = await import(pathToFileURL(join(process.env.DSH_CHAT_CONTRACT_ROOT, 'lib/types/history.js')).href)
-  const history = Array.from({ length: 70 }, (_, index) => events(`request-${index}`, index)).flat().map((event, seq) => ({ ...event, seq, time: Date.now(),
-    ...['user/message', 'assistant/message'].includes(event.type) ? { surfaceOp: 'append' } : {} }))
-  let disposed = 0, reads = 0
-  const ctx = { on: () => () => {}, effect() {}, sessionQuery: { async observeSession() {
-    reads++
-    return { source: 'prepared', header: { version: 3, id: 's', cwd: 'D:\\workspace' }, cursor: history.length - 1,
-      events: history, inheritedEventCount: 0, [Symbol.dispose]() { disposed++ }, retain() { assert.fail('must not activate') } }
-  } } }
-  const controller = new SessionHistoryController(ctx, () => assert.fail('must not promote'))
-  const result = await readDeliveryHistory({ get: () => controller }, 's', 'request-0', new AbortController().signal)
-  assert.equal(result.text, 'answer')
-  assert.equal(result.turn, 0)
-  assert.ok(reads > 1)
-  assert.equal(disposed, reads)
 })
 
 

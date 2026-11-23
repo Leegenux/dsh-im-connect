@@ -8,7 +8,9 @@
 
   **Connect Feishu, Lark, DingTalk, WeCom, WeChat, QQ, Telegram, Discord, and Slack to local DeepSeek Harness**
 
-  [简体中文](README.md) · [Changelog](CHANGELOG.md) · [QQ reference notes](docs/01-当前工作/I022-QQ直接引用接入/00-迭代总览.md) · [Apache-2.0](LICENSE)
+  [简体中文](README.zh-CN.md) · [English](README.en.md) · [日本語](README.ja.md) · [Español](README.es.md) · [Français](README.fr.md) · [Deutsch](README.de.md) · [Русский](README.ru.md) · [Português](README.pt.md)
+
+  [Changelog](CHANGELOG.md) · [License](LICENSE)
 
   [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
   [![npm package](https://img.shields.io/npm/v/%40michengai%2Fdsh-im-connect.svg?label=npm%20package)](https://www.npmjs.com/package/@michengai/dsh-im-connect)
@@ -69,7 +71,7 @@ WeChat is QR-only and DM-only, so the same WeChat account that scanned can talk 
 | 🐦 **Feishu** | ✅ Ready | QR, or App ID / App Secret; QR creates the bot automatically | Feishu account, or a self-built bot with App ID / Secret |
 | 🌐 **Lark** | ✅ Ready | QR, or App ID / App Secret | Lark account, or a self-built bot with App ID / Secret |
 | 💬 **WeChat** | ✅ Ready* | Official iLink QR | Dedicated account recommended; DM only |
-| 🏢 **WeCom** | ✅ Ready | QR (recommended), or Bot ID / Secret | WeCom intelligent bot |
+| 🏢 **WeCom** | ✅ Ready | QR (recommended), or Bot ID / Secret / WebSocket URL | WeCom intelligent bot; supports custom WebSocket URL for on-premise deployments |
 | 🐧 **QQ** | ✅ Ready | QR, or AppID / AppSecret | QQ Open Platform bot, not a personal QQ account |
 | ✈️ **Telegram** | ✅ Ready | Bot Token only | `@BotFather`; do not enable Webhook on the same bot |
 | 🎮 **Discord** | ✅ Ready | Bot Token only | Official Developer Portal bot. Enable the Message Content Intent. The first mention in a text or announcement channel continues in a thread without another mention |
@@ -93,7 +95,7 @@ The receive paths cover WeChat, WeCom, DingTalk, Feishu, Lark, QQ, Telegram, Dis
 
 WeChat, WeCom, DingTalk, Feishu, Lark, QQ, Telegram, Discord, and Slack accept ordinary files through Chat’s upload service for the current session. Send PDFs, documents or spreadsheets for the assistant to process. Format support follows web Chat’s models, tools and file capabilities; uploading does not guarantee that every format can be understood directly.
 
-- Requires the file-upload service on supported hosts (`>=0.2.0-rc.1 <0.3.0-0`). Legacy versions and breaking changes in the `0.3.0` generation are rejected by the version gate. If you still use a `0.1.x` host, install plugin `0.1.78` instead of `@latest`.
+- Requires the file-upload service on supported hosts (`>=0.2.2-rc.1 <0.3.0-0`). Legacy versions and breaking changes in the `0.3.0` generation are rejected by the version gate. If you still use a `0.1.x` host, install plugin `0.1.78`; if using `0.2.0`–`0.2.1`, install `1.0.45` instead of `@latest`.
 - Up to 4 ordinary files per message, totaling 20 MiB. Channel download limits also apply.
 - Files become standard Chat attachments and are submitted with session-specific receipts, rather than local-path text.
 - Private admission and group mention rules remain in force. File captions such as `/new` or “allow” are content, not commands or approval responses.
@@ -202,7 +204,7 @@ For a desktop workbench, download [DSH Codex Desktop](https://github.com/Micheng
 ## Prerequisites
 
 - A working DeepSeek Harness Web installation with `dsh` available in PowerShell.
-- Host compatibility: Full DeepSeek Harness `0.2.x` line (`>=0.2.0-rc.1 <0.3.0-0`), verified with `0.2.0-rc.1`, `0.2.0-rc.2`, `0.2.1-rc.1`–`0.2.1-rc.5`, and `0.2.2-rc.1`, and forwards-compatible with subsequent `0.2.x` RC releases without requiring routine plugin version bumps. Legacy versions and breaking changes in the `0.3.0` generation are rejected by the version gate. If you still use a `0.1.x` host, install plugin `0.1.78` instead of `@latest`.
+- Host compatibility: DeepSeek Harness `>=0.2.2-rc.1 <0.3.0-0`, verified with `0.2.2-rc.1` through `0.2.2-rc.5`, and forwards-compatible with subsequent `0.2.x` RC releases without requiring routine plugin version bumps. Legacy versions and breaking changes in the `0.3.0` generation are rejected by the version gate. If you still use a `0.1.x` host, install plugin `0.1.78`; if using `0.2.0`–`0.2.1`, install `1.0.45` instead of `@latest`.
 - Examples use the `web` profile; replace it with the target profile.
 - Source installation and development require Node.js 22+. npm installation does not require running `npm install` in an arbitrary directory.
 - After install, restart `dsh web` and hard-refresh the browser before opening **Settings → IM Assistant**.
@@ -240,7 +242,7 @@ The configuration output should contain `im-connect`. Restart DSH Web and hard-r
 The plugin follows standard DSH bundle configuration conventions. Options are located at:
 > **Sidebar → Plugins → Click `@michengai/dsh-im-connect`** (the host's `plugins.bundle.config` slot).
 
-Native configuration options are provided here. Their values are persisted in `channels.json` under the plugin's `stateDir` and survive restarts; they are not equivalent Cordis YAML options. `location` and `taskTreeSessions` are managed through this UI, while `onlineUpdate` is also subject to the host lock described below:
+Native configuration options are provided here. Their values are persisted in `channels.json` under the plugin's `stateDir` and survive restarts; they are not equivalent Cordis YAML options. `location` and `taskTreeSessions` are managed through this UI:
 
 ### 1. Entry Location (`location`)
 - **Default**: Settings only (`settings`)
@@ -250,20 +252,7 @@ Native configuration options are provided here. Their values are persisted in `c
   - **Settings only (`settings`)**: Unregisters the sidebar icon (gracefully switching active views if currently open) and retains only the entry in **Settings → IM Assistant**.
 - **Effect**: Clicking the sidebar icon opens the IM Assistant management page directly in the primary workspace with a **960px centered container** (matching host plugin manager conventions). This eliminates vertical scrolling constraints in narrow settings dialogs; state is synchronized live across both entry points.
 
-### 2. Online Updates (`onlineUpdate` / `updater`)
-- **Default**: Enabled (`true`)
-- **Description**: Controls whether the plugin checks for and installs updates from npm.
-- **Effect**:
-  - **Dynamic UI Sync**: Disabling the toggle hides the **Check for updates** button and version badge in the header immediately without requiring a full page reload;
-  - **Endpoint Guard**: When disabled, the update API route returns `HTTP 403` for all check and install requests, preventing unreviewed updates;
-  - **Host / Platform Lock**: For curated plugin indexes (such as VibeDev) or restricted enterprise environments, this can be locked directly via Cordis configuration (bundle patch) without needing UI interaction:
-    ```yaml
-    updater: false # or onlineUpdate: false
-    ```
-    Once configured, the updater is disabled at startup, the update action stays hidden, and the online-update switch is disabled. The host lock takes precedence over the user's choice in `channels.json` and cannot be lifted through the UI. Removing the host lock restores the saved user preference.
-  - **Update Modes**: When a newer release is available, **Update automatically** runs only when the DSH CLI or Desktop update service is available; otherwise, the dialog provides a profile-specific manual command to copy and run.
-
-### 3. Show IM Sessions in Task Tree (`taskTreeSessions`)
+### 2. Show IM Sessions in Task Tree (`taskTreeSessions`)
 - **Default**: Disabled (`false`, hides IM sessions in the workspace task tree by default to keep daily workspaces clean)
 - **Description**: Controls whether messaging channel sessions appear in the official workspace task tree.
 - **Effect**:
@@ -271,50 +260,81 @@ Native configuration options are provided here. Their values are persisted in `c
   - **Channels Tab Preserved**: Filtering applies only to the official workspace tree. All channel sessions remain fully available and accessible at any time under the sidebar's **Channels** tab;
   - **Lightweight Pipeline Collaboration**: Implemented via the `NativeTabRegistry.sessionFilters` inter-plugin protocol without invasive host hijacking. Toggling takes effect immediately and interoperates smoothly with Automation and Archive Manager. Non-supporting host shells degrade gracefully with a one-time warning.
 
-### 4. Telegram group trigger policy (`mentionPolicy` / `freeChatGroups`)
+### 3. Telegram group trigger policy (`mentionPolicy` / `freeChatGroups`)
 - **Default**: `addressed` — in groups the bot only reacts to an @mention, a reply to it, or a direct message.
-- **Account UI**: open Settings → IM Assistant → Telegram → account settings. Choose selected groups under “Group mention bypass” and enter their Telegram group IDs. Turning it off clears that account's bypass list; authorization remains unchanged.
-- **Legacy configuration**: existing deployments can still configure the trigger in that account's `channels.json`:
-  ```json
-  {
-    "channels": {
-      "<account id>": {
-        "config": {
-          "mentionPolicy": "addressed",
-          "freeChatGroups": "-1001234567890, -5496760438"
+- **What it does**: to let a group chat with the bot without @mentioning it, configure the trigger policy directly in **Settings → IM Assistant → Telegram Account Details**, or in `channels.json`:
+  - **Scenario A (specific groups only)**: configure `freeChatGroups` only; other groups keep default:
+    ```json
+    {
+      "channels": {
+        "<account id>": {
+          "config": {
+            "freeChatGroups": "-1001234567890, -5496760438"
+          }
         }
       }
     }
-  }
-  ```
-  - `mentionPolicy: "always"`: every plain group message triggers the bot for this account;
-  - `freeChatGroups`: relax only the listed groups (chat ids separated by commas/whitespace); other groups keep the default;
+    ```
+  - **Scenario B (all groups)**: configure `mentionPolicy` as `always` (no need to configure `freeChatGroups` in this mode):
+    ```json
+    {
+      "channels": {
+        "<account id>": {
+          "config": {
+            "mentionPolicy": "always"
+          }
+        }
+      }
+    }
+    ```
   - Both only decide whether a message reaches the agent — direct-message admission, tool approvals and command permissions are unchanged.
 - **Platform prerequisite**: with Telegram privacy mode the bot only receives mentions, replies and commands. Make the bot a group administrator, or run `setprivacy` → `Disable` in @BotFather, so plain group messages reach the plugin.
+- **UI**: configure visually by expanding Telegram account details in **Settings → IM Assistant** with policy select and group ID inputs.
 - **How to find Group IDs**:
-  - **Option 1 (Recommended)**: open Telegram Web in your browser, enter the group, and copy the address bar URL (e.g. `https://web.telegram.org/a/#-1001234567890` or the private group link `https://t.me/c/1234567890`). Paste it directly into the group ID input; it is normalized to the numeric ID before saving;
-  - **Option 2**: send any message in the group, forward it to a query bot (such as `@userinfobot`), and copy the chat `Id` (starts with a minus sign);
-  - **Option 3**: call `https://api.telegram.org/bot<TOKEN>/getUpdates` directly in your browser and check `"chat":{"id": -100xxxxxxxxxx}`.
-- **Persistence**: the account UI saves `freeChatGroups` as an array of at most 100 unique negative integer group IDs (1–20 digits after the minus sign). An explicitly saved list (including an empty list when disabled) overrides the legacy `config.mentionPolicy: "always"`. An active legacy all-groups policy is visibly identified, not mislabeled as off; changing unrelated settings leaves it intact. Choose Off or selected groups to replace it. Older clients that omit the fields preserve existing settings.
+  - **Option 1 (Recommended)**: Open Telegram Web in your browser, enter the group, and copy the address bar URL (e.g. `https://web.telegram.org/a/#-1001234567890` or private group link `https://t.me/c/1234567890`). You can paste it directly into the input field;
+  - **Option 2**: Send any message in the group, forward it to a query bot (such as `@userinfobot`), and copy the chat `Id` (starts with a minus sign);
+  - **Option 3**: Call `https://api.telegram.org/bot<TOKEN>/getUpdates` directly in your browser and check `"chat":{"id": -100xxxxxxxxxx}`.
 
-### Collapsible thinking message (`thinkingDisplay`)
-- **Default**: off (`mode: 'off'`); accounts with an existing plugin-level configuration show their effective mode.
-- **Account UI**: choose Off or Collapsible under “Thinking display” in Telegram account settings. The per-account `thinkingDisplayMode: "off" | "collapsed"` does not affect other accounts or model reasoning effort.
-- **What it does**: when enabled, the model's reasoning is sent as a separate Telegram collapsible quote (`<blockquote expandable>`) — about three lines collapsed, tap "show more" to expand. The same message is edited in place during the turn and retitled "🧠 Thought process" when the turn ends.
+### 4. Collapsible thinking message (`thinkingDisplay`)
+- **Default**: off (`mode: 'off'`).
+- **What it does**: when enabled, the model's reasoning is presented in an expandable form:
+  - **Telegram**: collapsible thinking is disabled, including for existing `collapsed` configurations. The thinking progress indicator and final answer remain available.
+  - **Feishu / Lark**: sent as an official native thinking-process bubble (`/open-apis/im/v1/message_cot`) for direct messages and main chat; seamlessly falls back to a collapsible card (`collapsible_panel`) within group message threads or when the tenant lacks native CoT permission, preventing reasoning from leaking outside threads.
 - **Example** (plugin config slot):
   ```yaml
   thinkingDisplay:
     mode: collapsed   # off | collapsed
     minChars: 120     # only send once this many characters accumulated
     intervalMs: 2000  # minimum interval between refreshes
-    maxChars: 3500    # per-message cap; longer text is truncated and noted
+    maxChars: 3500    # per-message cap; longer text is truncated and noted (native streaming CoT channels like Feishu use dedicated 64K budget)
   ```
-- **Channel support**: a channel must implement `sendThinking`; Telegram is the only implementation today, other channels ignore the setting and keep the existing status line.
-- **Boundaries and privacy**: collapsing is not access control; everyone who can read the group message can expand the reasoning. Enable only where sharing reasoning is intentional. Thinking is not counted as final-answer delivery or included in automatic recovery.
-- **Resources and lifecycle**: off/unsupported channels retain no raw reasoning. When enabled, each turn retains at most a 4096 UTF-16-unit prefix plus a scalar character count. Pending refreshes coalesce to the latest snapshot; cancellation, rebinding, muting, unloading and turn replacement prevent stale output.
+- **Channel and UI support**: implemented for Feishu and Lark; can be enabled in **Settings → IM Assistant → Account Details** by selecting **Collapsed** in the **Show thinking process** dropdown. Other channels ignore the setting and keep the existing status line.
+- **Boundaries and privacy**: collapsing is client-side display, not access control; everyone who can read the group message can expand the reasoning. Enable only where sharing reasoning is intentional. Thinking is not counted as final-answer delivery or included in automatic recovery.
+- **Resources and lifecycle**: off/unsupported channels retain no raw reasoning. When enabled, each turn retains at most the channel capacity (4096 UTF-16 units by default, 65536 for Feishu native CoT) as a bounded prefix plus a scalar character count. Pending refreshes coalesce to the latest snapshot; cancellation, rebinding, muting, unloading and turn replacement prevent stale output.
 - **Ranges**: `minChars` 0–4096 (also applied on final), `intervalMs` 1000–60000, `maxChars` 200–4096. Finite out-of-range values are clamped, nonfinite values use defaults. HTML escaping, labels, wrappers and truncation notes all fit the budget without splitting emoji surrogate pairs.
 - **Fallback**: only a definite HTML entity rejection switches to plain text, which persists for later edits in that turn. Unknown network outcomes, authentication failures and rate limits do not trigger a format-switch resend.
-- **Migration**: the old local `showReasoning` patch is not migrated automatically. Explicitly select Collapsible in the account UI, or set plugin-level `thinkingDisplay.mode: collapsed`. An explicitly saved account mode takes precedence; throttling and size parameters continue to inherit plugin-level configuration. Consult the web session for omitted reasoning if retained by the host.
+
+### 5. Feishu thread session isolation (`threadSessions`)
+- **Default**: disabled (`false`)
+- **Description**: When enabled, message threads in Feishu group chats maintain independent sessions and conversation context bounded by their root message ID. When disabled, all threads share the main group session context.
+- **UI Configuration**: Configure **Thread session isolation** directly in **Settings → IM Assistant → Feishu / Lark Account Settings** (select **Isolated sessions**); takes effect dynamically via account restart upon saving.
+- **Example** (account or plugin configuration):
+  ```json
+  {
+    "threadSessions": "true"
+  }
+  ```
+
+### 6. WeCom custom WebSocket URL (`wsUrl`)
+- **Default**: official default (`wss://openws.work.weixin.qq.com`)
+- **Description**: Configure a custom WebSocket URL for on-premise or private deployments; leave blank to fall back to the official default.
+- **UI Configuration**: Enter the **WebSocket URL** in the manual credentials form when adding an account, or inspect, modify, or clear it anytime in the account settings panel. Changes reconnect automatically upon saving.
+- **Example** (account configuration):
+  ```json
+  {
+    "wsUrl": "wss://custom.wecom.internal/ws"
+  }
+  ```
 
 ## Usage
 
@@ -342,6 +362,8 @@ Open **Settings → IM Assistant**, select **Add account** under the target chan
 | Approve a stranger DM | Open **Settings → IM Assistant** and approve or deny the pending request | Affects DM access only |
 | Answer an interactive question | Reply with an option number or text; separate multiple choices with commas, or enter a custom answer | Multiple questions arrive in order; only the initiating user can answer in a group |
 | Approve a tool | Reply `Approve` / `Deny` or `批准` / `拒绝` in a DM | Also accepts `yes` / `no` / `allow` / `reject`; group replies cannot grant |
+| Feishu thread isolation | Open Settings on the Feishu / Lark account row and toggle Thread session isolation | Group message threads maintain isolated sessions and context; disabled by default (shares group context) |
+| Silent reply protocol | Include `NO_REPLY` or `<<<NO_REPLY>>>` in the model output | When the agent determines no reply is required, the plugin silently finishes the turn without sending fallback notice cards |
 | Review on the web | Open the workspace **Channels** tab | IM sessions never appear under **Tasks** |
 
 After `/workspace`, `/new` and continuing after archiving the current session keep the selected workspace and use the account model, Agent preset, and permission preset. `/session` and `/fork` preserve the original session configuration.
@@ -351,6 +373,18 @@ Switching sessions stops output pushes from previous sessions to this chat, incl
 Explicitly binding a session with `/session` restores its output, including when selecting the current session again. Mute pauses assistant text and file output; approvals, questions, and task status notices still arrive. Switching or muting discards queued stream updates and cached text; an already sent partial card may remain visible, but the next output starts a fresh stream.
 
 DingTalk replies prefer official AI Card streaming. If card creation fails, plain text preserves line breaks; code fences and list markers remain literal. QQ replies use official markdown and keep headings, bold text, links, and tables; only a platform rejection falls back to plain text (where tables become lists). Telegram replies are sent as Rich Messages with Markdown so headings, bold text, and tables render, falling back to plain text when that method is unavailable; do not enable Webhook on the same bot. Feishu normal replies also use card Markdown, so headings and tables render; cards are split so none holds more than five tables, with a plain-text fallback. Long replies split with structure awareness: table chunks repeat the header, code fences are re-closed, and the `(n/m)` marker only prefixes prose chunks. `/help` is grouped as getting around / sessions and workspaces / models and reasoning / tasks and delivery, with one entry per feature and the usable aliases marked; group titles are bold while the rest of the command copy stays plain text, which keeps them scannable on a phone. Discord renders headings, bold text, code, and lists on the client but has no Markdown tables, and mobile clients cannot scroll horizontally, so pipe tables become a vertical block per row (first two columns as a bold title, remaining columns as `header: value`). Everything else is sent verbatim. Do not configure a Discord Interactions Endpoint URL, or button clicks will not arrive through the Gateway. Slack also has no Markdown tables and no `#` headings, so outgoing text is converted to mrkdwn: headings become a bold whole line, tables become the same vertical block, `**bold**` becomes `*bold*`, and links become `<url|label>`, while code fences stay untouched.
+
+### Feishu threads & interactive cards
+
+- **Accurate thread replies**: When replying to specific messages or threads in Feishu group chats, the assistant precisely invokes Feishu's `reply` API targeting the root message ID, eliminating fallback drops into the group lobby.
+- **Card message extraction**: Supports parsing Feishu interactive card content (recursively extracting text, buttons, and Markdown elements) with automatic safe truncation to prevent data loss.
+- **In-thread card button callbacks**: Interactive card button clicks within a thread preserve full original thread context, ensuring approvals and option selections resolve inside the correct thread.
+
+### Silent reply protocol (`NO_REPLY`)
+
+In group chats or automated workflows, when the agent decides no user-visible response is needed (e.g. routine background check passing, scheduled job completion, or mentions where speaking is unnecessary):
+- The model outputs `NO_REPLY` or `<<<NO_REPLY>>>` (either standalone or as a trailing marker).
+- The gateway detects the silent marker and finishes the turn silently, fully suppressing the "Processing completed with no deliverable result" placeholder card to keep chats clean.
 
 ### Telegram topic naming
 

@@ -93,6 +93,9 @@ export interface AccountView {
     proxyMode: ChannelProxyMode;
     proxyConfigured: boolean;
     proxyUrl?: string;
+    mentionPolicy?: 'addressed' | 'always';
+    threadSessions?: boolean;
+    wsUrl?: string;
     lastCheckedAt?: string;
 }
 interface AccountDiagnosticResult {
@@ -124,6 +127,15 @@ export interface ChannelView {
     online: number;
     total: number;
 }
+export interface ChannelSessionGroup {
+    /** 兼容期平台标识（供旧客户端按平台聚合），多账号时平台内各账号实例共享；后续大版本迁移后将统一为 accountId */
+    id: string;
+    /** 账号唯一实例 ID */
+    accountId: string;
+    platform: ChannelId;
+    label: string;
+    sessions: SessionRecord[];
+}
 interface PendingRequest {
     userId: string;
     username?: string;
@@ -148,7 +160,6 @@ export declare class ChannelManager {
     private readonly log;
     private readonly ctx;
     private readonly engineConfig;
-    private readonly hostUpdateDisabled;
     private store;
     private readonly running;
     private readonly proxyUrlCache;
@@ -165,17 +176,13 @@ export declare class ChannelManager {
         stateDir: string;
         log: (line: string) => void;
         engineConfig: EngineConfig;
-        hostUpdateDisabled?: boolean;
     });
     list(): ChannelView[];
     private hydrateProxyUrl;
     private hydrateProxyUrls;
     private accountView;
-    channelSessions(): {
-        id: ChannelId;
-        label: string;
-        sessions: SessionRecord[];
-    }[];
+    accountGroupLabel(accountId: string, state: ChannelState | undefined, multiAccount: boolean): string;
+    channelSessions(): ChannelSessionGroup[];
     connect(id: ChannelId, config?: Record<string, string>, settings?: Record<string, unknown>): Promise<{
         ok: boolean;
         error?: string;
@@ -203,9 +210,6 @@ export declare class ChannelManager {
     setSidebarEntry(enabled: boolean): Promise<boolean>;
     getTaskTreeSessions(): boolean;
     setTaskTreeSessions(enabled: boolean): Promise<boolean>;
-    isHostUpdateDisabled(): boolean;
-    isUpdateEnabled(): boolean;
-    setOnlineUpdate(enabled: boolean): Promise<boolean>;
     currentAssistant(): AssistantModel | undefined;
     updateAccount(accountId: string, input: Record<string, unknown>): Promise<{
         ok: boolean;

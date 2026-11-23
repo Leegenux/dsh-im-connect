@@ -39,3 +39,7 @@ test-shots/
 .env
 .env.*
 secrets.json
+
+# Local build and repair outputs. Tracked lib artifacts remain versioned.
+artifacts/
+*.before-dsh-repair-*

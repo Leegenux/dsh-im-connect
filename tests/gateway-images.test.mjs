@@ -8,6 +8,7 @@ import { Context } from '@deepseek-ai/cordis'
 import { ImEngine } from '../lib/engine/gateway.js'
 import { SessionMapStore } from '../lib/engine/session-store.js'
 import { SeenStore } from '../lib/engine/seen-store.js'
+import { sessionSelection } from './host-contract.mjs';
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADElEQVQImWP4z8AAAAMBAQCc479ZAAAAAElFTkSuQmCC', 'base64')
 function setup(t, id = 'account-opaque-123', controller, options = {}) {
@@ -213,7 +214,7 @@ test('real DSH Chat admission: current selection, durable refs, unknown modaliti
   }
   Object.assign(host, promptServices(root, host.attachments))
   const owner = new ApiSessionAgentController(host)
-  owner.selectionFor(agent).current = { provider: 'session-provider', model: 'session-vision' }
+  const selection = sessionSelection(owner, agent, { provider: 'session-provider', model: 'session-vision' })
   const controller = Object.create(SessionController.prototype)
   // 控制器保留真实宿主上下文；进程内调用没有 Remote invocation。
   controller.ctx = host
@@ -237,7 +238,7 @@ test('real DSH Chat admission: current selection, durable refs, unknown modaliti
   const inflight = h.send()
   await started
   let switched = false
-  const switching = owner.serializeImageAdmission(agent, async () => { switched = true; owner.selectionFor(agent).current = { provider: 'session-provider', model: 'next-model' } })
+  const switching = owner.serializeImageAdmission(agent, async () => { switched = true; selection.current = { provider: 'session-provider', model: 'next-model' } })
   await new Promise(resolve => setImmediate(resolve))
   assert.equal(switched, false)
   release()

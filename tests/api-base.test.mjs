@@ -11,12 +11,9 @@ import { readFile } from 'node:fs/promises'
 import React from 'react'
 import ReactDOM from 'react-dom'
 import ReactDOMClient from 'react-dom/client'
-import { resolveApiUrl as sharedResolveApiUrl } from '../lib/api-base.js'
-import { resolveApiUrl as updateResolveApiUrl } from '../src/plugin-update-ui.js'
 
 const bundleSource = await readFile(new URL('../lib/client.js', import.meta.url), 'utf8')
 const clientSource = await readFile(new URL('../client.js', import.meta.url), 'utf8')
-const updateUiSource = await readFile(new URL('../src/plugin-update-ui.js', import.meta.url), 'utf8')
 
 // 模拟宿主 AMD 加载器：执行 bundle，捕获 load 定义，再调用 factory 读取导出。
 let loaded = null
@@ -86,12 +83,12 @@ test('页面地址不带结尾斜杠时也能保留完整前缀', () => {
   })
 })
 
-test('更新检查端点同样经 base 解析', () => {
+test('管理端点同样经 base 解析', () => {
   withBase('https://nas.example.com/app/dsh/', () => {
     assert.equal(
-      resolveApiUrl('/api/michengai/dsh-im-connect/update'),
-      'https://nas.example.com/app/dsh/api/michengai/dsh-im-connect/update',
-      'update endpoint resolves against the same base',
+      resolveApiUrl('/api/michengai/dsh-im-connect/sidebar-entry'),
+      'https://nas.example.com/app/dsh/api/michengai/dsh-im-connect/sidebar-entry',
+      'management endpoint resolves against the same base',
     )
   })
 })
@@ -125,17 +122,9 @@ test('无 document 或非法 base 时安全回退', () => {
   })
 })
 
-test('更新 UI 直接消费共享解析器，避免维护无引用的重复实现', () => {
-  assert.equal(updateResolveApiUrl, sharedResolveApiUrl)
-})
-
 test('源码出口级防回归断言', () => {
   assert.ok(
     clientSource.includes('resolveApiUrl('),
     'client.js resolves API endpoints through resolveApiUrl',
-  )
-  assert.ok(
-    updateUiSource.includes('const endpoint = resolveApiUrl(options.endpoint)'),
-    'src/plugin-update-ui.js resolves the update endpoint once at module entry',
   )
 })
