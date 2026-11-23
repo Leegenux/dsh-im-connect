@@ -76,6 +76,20 @@ test('Telegram 长轮询解析入站消息并在渠道完成分流后提交 offs
   }
 })
 
+test('multi-part stream retains every platform receipt while audit remains conservative', async () => {
+  let id = 80
+  const restore = mockFetch(async (url) => {
+    const method = String(url).split('/').pop()
+    return { json: async () => ({ ok: true, result: { message_id: method === 'editMessageText' ? 81 : ++id } }) }
+  })
+  const channel = createTelegramChannel({ token: 'test-token' }, () => undefined)
+  try {
+    const stream = await channel.beginReply('123')
+    assert.deepEqual(await stream.finishWithReceipt('x'.repeat(8001)), {})
+    assert.deepEqual(stream.receipt(), { platformMessageIds: ['81', '82', '83'] })
+  } finally { await channel.stop(); restore() }
+})
+
 test('Telegram 流式只发一条占位，后续只编辑同一条', async () => {
   const calls = []
   const restore = mockFetch(async (url, init) => {

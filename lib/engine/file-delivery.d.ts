@@ -33,7 +33,10 @@ export declare class FileDelivery {
     deliver(session: DeliverySession, closing: Event, target: () => {
         channel: ChannelAdapter;
         chatId: string;
-    } | undefined, onContent?: () => void): Promise<boolean>;
+    } | undefined, onContent?: () => void, sendFile?: (channel: ChannelAdapter, chatId: string, file: {
+        name: string;
+        data: Uint8Array;
+    }, signal: AbortSignal, index: number) => Promise<void>): Promise<boolean>;
 }
 export {};
 //# sourceMappingURL=file-delivery.d.ts.map

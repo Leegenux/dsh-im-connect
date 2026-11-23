@@ -49,6 +49,10 @@ export interface ReplyStream {
     finish(text: string): Promise<void>;
     /** Platform identifiers confirmed while sending this reply. */
     receipt?(): DeliveryReceipt | undefined;
+    /** Optional evidence for the complete finalized body; missing ID means unconfirmed. */
+    finishWithReceipt?(text: string): Promise<{
+        platformMessageId?: string;
+    }>;
     /** Stop channel-level reuse when taken for finalization, without closing this handle. */
     seal?(): void;
     /** 只改顶部状态行（思考 / 工具进度），不碰正文；渠道不支持时省略。 */
@@ -95,6 +99,13 @@ export interface ChannelAdapter {
         name: string;
         data: Uint8Array;
     }, signal?: AbortSignal): Promise<void>;
+    /** Optional platform receipt for the same file delivery operation. */
+    sendFileWithReceipt?(chatId: string, file: {
+        name: string;
+        data: Uint8Array;
+    }, signal?: AbortSignal): Promise<{
+        platformMessageId?: string;
+    }>;
     setMessageHandler(handler: (msg: ImMessage) => void | Promise<void>): void;
     status(): string;
     /** 使用平台查询或现有连接心跳诊断，不发送聊天消息，也不启动新连接。 */

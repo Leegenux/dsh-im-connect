@@ -440,7 +440,7 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
     if (markdown !== undefined) {
       try {
         const sent = await api<{ message_id?: number }>('sendRichMessage', { chat_id: route.chatId, ...threadParam, rich_message: { markdown } })
-        return Number.isSafeInteger(sent?.message_id) ? sent.message_id : undefined
+        return Number.isSafeInteger(sent?.message_id) && sent!.message_id! > 0 ? sent.message_id : undefined
       } catch (error) {
         // Transport retries already ran; do not restart their budget by switching formats.
         if ((error as { rejected?: boolean })?.rejected !== true) throw error
@@ -451,7 +451,7 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
       }
     }
     const sent = await api<{ message_id?: number }>('sendMessage', { chat_id: route.chatId, ...threadParam, text })
-    return Number.isSafeInteger(sent?.message_id) ? sent.message_id : undefined
+    return Number.isSafeInteger(sent?.message_id) && sent!.message_id! > 0 ? sent.message_id : undefined
   }
 
   async function sendDocument(chatId: string, file: { name: string; data: Uint8Array }, signal?: AbortSignal): Promise<{ platformMessageId?: string }> {

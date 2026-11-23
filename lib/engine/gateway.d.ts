@@ -116,6 +116,7 @@ export declare class ImEngine {
     private rejectUnauthorized;
     private handleInbound;
     private validDelivery;
+    private deliverTurnSummary;
     private recoverDelivery;
     private recoverDeliveries;
     private deliveryCommand;
@@ -200,6 +201,10 @@ export declare class ImEngine {
      * 结果不明的失败（超时、网络中断）立即返回：请求可能已经送达。
      * 等待超过 `deadline` 就放弃，让整条回复的重试开销有上界。
      */
+    private auditIdentity;
+    private observeAudit;
+    /** Observe a single adapter operation without changing its result or retry behavior. */
+    private auditOperation;
     private sendChunk;
     private formatQuestion;
     private deliverQuestionInteraction;
