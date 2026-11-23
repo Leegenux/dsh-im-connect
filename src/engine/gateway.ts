@@ -207,6 +207,7 @@ export class ImEngine {
   }
   /** 话题名回写状态：默认一个话题只命名一次。 */
   private readonly topicTitles: TopicTitleStore
+  private readonly topicEditVersions = new Map<string, symbol>()
   private readonly topicWrites = new KeyedSerialQueue()
   /** 跨插件入口：话题开场白持久化（不投递、不启动回合）。 */
   private readonly topicContextService: TopicContextService
@@ -380,12 +381,14 @@ export class ImEngine {
   }
 
   register(channel: ChannelAdapter): void {
+    for (const key of this.topicEditVersions.keys()) if (key.startsWith(`${channel.id}:`)) this.topicEditVersions.delete(key)
     this.channels.set(channel.id, channel)
     channel.setMessageHandler((msg) => this.enqueue(channel.id, msg))
-    channel.setTopicEditHandler?.((chatId, name) => this.observeTopicEdit(channel.id, chatId, name))
+    channel.setTopicEditHandler?.((chatId, name, metadata) => this.observeTopicEdit(channel, chatId, name, metadata))
   }
 
   unregister(channelId: string): void {
+    for (const key of this.topicEditVersions.keys()) if (key.startsWith(`${channelId}:`)) this.topicEditVersions.delete(key)
     this.cancelInputs(channelId)
     this.channels.delete(channelId)
   }
@@ -416,6 +419,7 @@ export class ImEngine {
 
   dispose(): void {
     this.disposed = true
+    this.topicEditVersions.clear()
     this.thinking.dispose()
     if (this.deferredTimer) clearInterval(this.deferredTimer)
     this.recoveryScope.abort()
@@ -1363,7 +1367,8 @@ export class ImEngine {
         this.router.setTitle(sessionId, title.title, title.source)
         // 首条消息的 fallback 标题就是原文（如「在么」），拿它当话题名太糙；
         // 真正命名留给紧随其后的 provider 标题。
-        if ((event.data as { source?: { kind?: string } })?.source?.kind !== 'fallback') {
+        const source = (event.data as { source?: { kind?: string; origin?: string } })?.source
+        if (source?.kind !== 'fallback' && source?.origin !== 'telegram' && source?.kind !== 'telegram') {
           void this.syncTopicName(sessionId, title.title)
         }
       }
@@ -1715,14 +1720,45 @@ export class ImEngine {
   }
 
   /** 话题被改名：自己写入的回显忽略，人工改名则锁定。私聊话题不会推送此事件。 */
-  private observeTopicEdit(channelId: string, chatId: string, name: string): void {
+  private observeTopicEdit(channel: ChannelAdapter, chatId: string, name: string, metadata?: { forumGroup: boolean }): void {
+    const channelId = channel.id
+    if (this.disposed || this.channels.get(channelId) !== channel) return
     const key = `${channelId}:${chatId}`
     try {
+      const previous = this.topicTitles.get(key)
       const result = this.topicTitles.observeEdit(key, name)
       if (result === 'frozen') this.log(`[${channelId}] 话题已被人工改名，后续不再自动同步：${name}`)
+      const retry = result === 'self' && previous?.frozenAt && previous.name === clampTopicName(name) && !this.topicEditVersions.has(key)
+      if ((result === 'frozen' || retry) && metadata?.forumGroup && /^-?\d+:[1-9]\d*$/.test(chatId)
+        && this.router.lookup(channelId, 'group', chatId)) {
+        const version = Symbol()
+        this.topicEditVersions.set(key, version)
+        void this.syncTelegramTopicTitle(channel, chatId, name, version).catch(error => {
+          this.log(`[${channelId}] 会话标题同步失败: ${error instanceof Error ? error.message : String(error)}`)
+        }).finally(() => {
+          if (this.topicEditVersions.get(key) === version) this.topicEditVersions.delete(key)
+        })
+      }
     } catch (error) {
       this.log(`[${channelId}] 话题改名事件处理失败: ${error instanceof Error ? error.message : String(error)}`)
     }
+  }
+
+  private async syncTelegramTopicTitle(channel: ChannelAdapter, chatId: string, name: string, version: symbol): Promise<void> {
+    const binding = this.router.lookup(channel.id, 'group', chatId)
+    if (!binding) return
+    const host = this.ctx as unknown as { get(name: string): unknown }
+    const sessions = host.get('sessions') as { get?(id: string): unknown } | undefined
+    let session = sessions?.get?.(binding.sessionId)
+    if (!session) {
+      const controller = host.get('sessionController') as { resolveAgent?(id: string): Promise<{ agent?: { session?: unknown } }> } | undefined
+      session = (await controller?.resolveAgent?.(binding.sessionId))?.agent?.session
+    }
+    const current = this.router.lookup(channel.id, 'group', chatId)
+    if (!session || this.disposed || this.channels.get(channel.id) !== channel || current?.sessionId !== binding.sessionId
+      || this.topicEditVersions.get(`${channel.id}:${chatId}`) !== version) return
+    const titles = host.get('sessionTitle') as { syncTelegramTopicTitle?(session: unknown, title: string): unknown } | undefined
+    titles?.syncTelegramTopicTitle?.(session, name)
   }
 
   /** /rename 之后把新标题同步到话题名（显式操作，不受 once 限制）。 */
