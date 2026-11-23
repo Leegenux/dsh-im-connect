@@ -15,7 +15,7 @@ function fixture(t, options = {}) {
   const sessionId = 'im:telegram:dm:1700000000000:100:20'
   store.upsert('telegram:dm:100:20', { sessionId, channel: 'telegram', kind: 'dm', chatId: '100:20', title: '测试', updatedAt: new Date().toISOString() })
   const replies = []
-  const engine = new ImEngine({ get: name => name === 'settings' && options.locale ? { get: () => ({ preference: options.locale }) } : undefined }, store, new SeenStore(join(dir, 'seen.json')), {
+  const engine = new ImEngine({ get: name => name === 'settings' && options.locale ? { get: () => ({ preference: options.locale }) } : options.services?.[name] }, store, new SeenStore(join(dir, 'seen.json')), {
     cwd: dir, provider: 'p', model: 'm', agentPreset: '', mergeTimeoutSecs: 1, permissionPreset: '', ...options.config,
   }, () => {})
   const writes = []
@@ -29,7 +29,7 @@ function fixture(t, options = {}) {
   engine.register(channel)
   t.after(() => { engine.dispose(); rmSync(dir, { recursive: true, force: true }) })
   const title = (name, kind = 'provider') => engine.onSessionEvent({ id: sessionId }, { type: 'session/title', data: { title: name, source: { kind } } })
-  return { engine, store, writes, replies, title, edit: name => edited('100:20', name), sessionId, channel }
+  return { engine, store, writes, replies, title, edit: (name, metadata) => edited('100:20', name, metadata), sessionId, channel }
 }
 
 test('默认 once 并发标题只写一次，后续标题不覆盖首次命名', async t => {
@@ -45,6 +45,120 @@ test('默认 once 并发标题只写一次，后续标题不覆盖首次命名',
   await tick()
   assert.deepEqual(beforeRelease, ['第一个标题'])
   assert.deepEqual(f.writes, ['第一个标题'])
+})
+
+test('论坛人工改名同步当前绑定的会话，不创建回合或回写平台', async t => {
+  const session = { id: 'cold-session' }
+  const calls = []
+  const f = fixture(t, { services: {
+    sessions: { get: id => id === 'cold-session' ? session : undefined, flush: async () => true },
+    sessionTitle: { syncTelegramTopicTitle: (value, name) => { calls.push([value, name]); return { title: name } } },
+  } })
+  f.store.upsert('telegram:group:100:20', { sessionId: session.id, channel: 'telegram', kind: 'group', chatId: '100:20', updatedAt: new Date().toISOString() })
+  f.edit('群话题新名', { forumGroup: true })
+  assert.deepEqual(calls, [[session, '群话题新名']])
+  assert.deepEqual(f.writes, [])
+  assert.deepEqual(f.replies, [])
+})
+
+test('冷会话恢复时只应用最新改名并重新检查绑定', async t => {
+  const pending = []
+  const calls = []
+  const f = fixture(t, { services: {
+    sessions: { get: () => undefined, flush: async () => true },
+    sessionController: { resolveAgent: () => new Promise(resolve => pending.push(resolve)) },
+    sessionTitle: { syncTelegramTopicTitle: (session, name) => calls.push([session.id, name]) },
+  } })
+  const key = 'telegram:group:100:20'
+  const record = { sessionId: 'old', channel: 'telegram', kind: 'group', chatId: '100:20', updatedAt: new Date().toISOString() }
+  f.store.upsert(key, record)
+  f.edit('第一次', { forumGroup: true })
+  f.edit('第二次', { forumGroup: true })
+  f.edit('第二次', { forumGroup: true }) // 重复回显不能取消仍在恢复的同名更新
+  pending[0]({ agent: { session: { id: 'old' } } })
+  await tick()
+  pending[1]({ agent: { session: { id: 'old' } } })
+  await tick()
+  assert.deepEqual(calls, [['old', '第二次']])
+  f.edit('第三次', { forumGroup: true })
+  f.store.upsert(key, { ...record, sessionId: 'new' })
+  pending[2]({ agent: { session: { id: 'old' } } })
+  await tick()
+  assert.deepEqual(calls, [['old', '第二次']])
+})
+
+test('失效渠道的迟到回调不改变话题状态', t => {
+  const f = fixture(t)
+  f.engine.unregister('telegram')
+  f.edit('迟到', { forumGroup: true })
+  assert.equal(f.engine.topicTitles.get('telegram:100:20'), undefined)
+})
+
+test('宿主服务不可用后同名人工改名可以重试', async t => {
+  const calls = []
+  const services = { sessions: { get: id => ({ id }), flush: async () => true } }
+  const f = fixture(t, { services })
+  f.store.upsert('telegram:group:100:20', { sessionId: 'cold', channel: 'telegram', kind: 'group', chatId: '100:20', updatedAt: new Date().toISOString() })
+  f.edit('重试', { forumGroup: true })
+  await tick()
+  services.sessionTitle = { syncTelegramTopicTitle: (session, name) => calls.push([session.id, name]) }
+  f.edit('重试', { forumGroup: true })
+  await tick()
+  assert.deepEqual(calls, [['cold', '重试']])
+  assert.equal(f.engine.topicEditVersions.size, 0)
+})
+
+test('一个冷会话恢复卡住时其他话题仍能提交标题', async t => {
+  const calls = []
+  const f = fixture(t, { services: {
+    sessions: { get: () => undefined, flush: async () => true },
+    sessionController: { resolveAgent: id => id === 'stuck' ? new Promise(() => {}) : Promise.resolve({ agent: { session: { id } } }) },
+    sessionTitle: { syncTelegramTopicTitle: (session, name) => calls.push([session.id, name]) },
+  } })
+  for (const [chatId, sessionId] of [['100:20', 'stuck'], ['100:21', 'ready']]) {
+    f.store.upsert(`telegram:group:${chatId}`, { sessionId, channel: 'telegram', kind: 'group', chatId, updatedAt: new Date().toISOString() })
+  }
+  f.engine.observeTopicEdit(f.channel, '100:20', '等待', { forumGroup: true })
+  f.engine.observeTopicEdit(f.channel, '100:21', '继续', { forumGroup: true })
+  await tick()
+  assert.deepEqual(calls, [['ready', '继续']])
+  assert.equal(f.engine.topicTitleOutbox.list().length, 1)
+})
+
+test('待处理改名跨引擎重建并在宿主确认落盘后清除', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'topic-restart-'))
+  const file = join(dir, 'topic-titles.json')
+  const store = new SessionMapStore(join(dir, 'sessions.json'))
+  store.upsert('telegram:group:100:20', { sessionId: 'cold', channel: 'telegram', kind: 'group', chatId: '100:20', updatedAt: new Date().toISOString() })
+  const services = { sessions: { get: id => ({ id }), flush: async () => false }, sessionTitle: { syncTelegramTopicTitle() {} } }
+  const make = () => {
+    let edit
+    const engine = new ImEngine({ get: name => services[name] }, store, new SeenStore(join(dir, 'seen.json')), { cwd: dir, provider: 'p', model: 'm', agentPreset: '', mergeTimeoutSecs: 1, permissionPreset: '' }, () => {}, undefined, undefined, undefined, undefined, undefined, undefined, file)
+    engine.register({ id: 'telegram', label: 'Telegram', maxMessageLength: 4000, start() {}, stop() {}, send: async () => {}, status: () => 'online', setMessageHandler() {}, setTopicEditHandler(handler) { edit = handler } })
+    return { engine, edit: (name, metadata) => edit('100:20', name, metadata) }
+  }
+  const first = make()
+  t.after(() => { first.engine.dispose(); rmSync(dir, { recursive: true, force: true }) })
+  first.edit('恢复标题', { forumGroup: true })
+  await tick()
+  assert.equal(first.engine.topicTitleOutbox.list().length, 1)
+  first.engine.dispose()
+  const calls = []
+  services.sessions.flush = async () => true
+  services.sessionTitle.syncTelegramTopicTitle = (session, name) => calls.push([session.id, name])
+  const second = make()
+  t.after(() => second.engine.dispose())
+  await tick()
+  assert.deepEqual(calls, [['cold', '恢复标题']])
+  assert.equal(second.engine.topicTitleOutbox.list().length, 0)
+})
+
+test('Telegram 来源标题事件更新索引但不向平台回写', async t => {
+  const f = fixture(t, { config: { topicNaming: 'follow' } })
+  await f.engine.onSessionEvent({ id: f.sessionId }, { type: 'session/title', data: { title: '新名', source: { kind: 'user', origin: 'telegram' } } })
+  await tick()
+  assert.deepEqual(f.writes, [])
+  assert.equal(f.store.findSession(f.sessionId).title, '新名')
 })
 
 test('首次自动命名前的人工改名也会锁定话题', async t => {

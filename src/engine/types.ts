@@ -135,7 +135,7 @@ export interface ChannelAdapter {
    */
   renameTopic?(chatId: string, name: string): Promise<boolean>
   /** 订阅平台侧「话题被改名」事件；Telegram 由 forum_topic_edited 服务消息提供。 */
-  setTopicEditHandler?(handler: (chatId: string, name: string) => void): void
+  setTopicEditHandler?(handler: (chatId: string, name: string, metadata?: { forumGroup: boolean }) => void | Promise<void>): void
   /** 企业微信等回调通道不能等合并窗口，必须立刻处理。 */
   skipMerge?: boolean
   /**

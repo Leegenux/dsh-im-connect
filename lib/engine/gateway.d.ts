@@ -80,6 +80,11 @@ export declare class ImEngine {
     private readonly inputScopes;
     /** 话题名回写状态：默认一个话题只命名一次。 */
     private readonly topicTitles;
+    private readonly topicEditVersions;
+    private readonly topicTitleOutbox;
+    private readonly topicOutboxWorkers;
+    private topicOutboxCursor;
+    private readonly topicOutboxTimer;
     private readonly topicWrites;
     /** 跨插件入口：话题开场白持久化（不投递、不启动回合）。 */
     private readonly topicContextService;
@@ -172,6 +177,8 @@ export declare class ImEngine {
     private topicMode;
     /** 话题被改名：自己写入的回显忽略，人工改名则锁定。私聊话题不会推送此事件。 */
     private observeTopicEdit;
+    private recoverTopicTitles;
+    private syncTelegramTopicTitle;
     /** /rename 之后把新标题同步到话题名（显式操作，不受 once 限制）。 */
     renameTopicNow(sessionId: string, title: string): Promise<void>;
     /** 正常交付保持安静；仅异常结果追加必要文字提示。 */

@@ -150,6 +150,36 @@ test('适配器：频控 429 不抛错，返回 false 交给下轮重试', async
   }
 })
 
+test('适配器仅将真实群论坛人工改名标为可同步', async () => {
+  const events = []
+  const messages = []
+  const original = globalThis.fetch
+  let polls = 0
+  const base = { message_id: 10, message_thread_id: 20, date: 1, chat: { id: -100, type: 'supergroup', is_forum: true }, from: { id: 2, is_bot: false }, forum_topic_edited: { name: '新名' } }
+  const variants = [base, { ...base, forum_topic_edited: {} }, { ...base, message_thread_id: undefined }, { ...base, chat: { ...base.chat, is_forum: false } }, { ...base, from: undefined }, { ...base, from: { id: 3, is_bot: true } }]
+  globalThis.fetch = async url => {
+    if (String(url).includes('getUpdates')) {
+      const result = polls++ === 0 ? variants.map((message, i) => ({ update_id: i + 1, message })) : []
+      if (polls > 3) throw new Error('停止轮询')
+      return { json: async () => ({ ok: true, result }) }
+    }
+    if (String(url).includes('getMe')) return { json: async () => ({ ok: true, result: { id: 1, is_bot: true } }) }
+    if (String(url).includes('getWebhookInfo')) return { json: async () => ({ ok: true, result: {} }) }
+    return { json: async () => ({ ok: true, result: true }) }
+  }
+  try {
+    const adapter = createTelegramChannel({ token: '123:abc' }, () => {})
+    adapter.setMessageHandler(message => messages.push(message))
+    adapter.setTopicEditHandler((chatId, name, metadata) => events.push({ chatId, name, metadata }))
+    await adapter.start()
+    await new Promise(resolve => setTimeout(resolve, 400))
+    await adapter.stop()
+    assert.deepEqual(events.map(event => event.metadata.forumGroup), [true, false, false, false, false])
+    assert.deepEqual(events[0], { chatId: '-100:20', name: '新名', metadata: { forumGroup: true } })
+    assert.deepEqual(messages, [])
+  } finally { globalThis.fetch = original }
+})
+
 test('适配器：forum_topic_edited 只上报，不产生对话回合', async () => {
   let edited
   const messages = []
