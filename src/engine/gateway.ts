@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { DeferredDelivery, DeliveryRejected, DeliveryUnavailable, type DeferredEntry } from './deferred-delivery.js'
 import { ChoiceSendError } from './choice-delivery.js'
 import { sleepWithSignal } from './abort.js'
@@ -111,6 +112,8 @@ export interface DeliveryOutcome {
 export function isDefiniteSendFailure(error: unknown): boolean {
   return error instanceof DeliveryRejected || error instanceof DeliveryUnavailable
 }
+
+interface DeliveryAuditIdentity { sessionId: string; turnId: number; requestId: string; seq?: number; part: number }
 
 interface AgentLike {
   id?: string
@@ -1216,6 +1219,7 @@ export class ImEngine {
     event: {
       type?: string
       time?: number
+      seq?: number
       data?: {
         turn?: number
         message?: { content?: Array<{ type?: string; text?: string }>; toolCallId?: string; isError?: boolean }
@@ -1421,6 +1425,10 @@ export class ImEngine {
           await this.discardEmptyTake(taken)
           return
         }
+        const turnId = event.data?.turn ?? this.observedTurns.get(sessionId)
+        const entries = this.deferred.turnEntries(sessionId, turnId)
+        const audit: DeliveryAuditIdentity | undefined = channel.id === 'telegram' && turnId !== undefined && entries.length === 1
+          ? { sessionId, turnId, requestId: entries[0]!.id, seq: Number.isSafeInteger(event.seq) ? event.seq : undefined, part: 0 } : undefined
         if (taken.stream) {
           const finalText = text || taken.text
           // 这一步只有工具调用、没有正文：状态消息留着，下一步继续改同一条，
@@ -1438,10 +1446,21 @@ export class ImEngine {
             const bubbles = this.segmentBubbles(channel, finalText)
             let delivered = true
             if (bubbles.length > 1 && !await this.pauseBeforeSegment(channel.id)) return
+            const streamAudit = audit && taken.stream.finishWithReceipt ? this.auditIdentity(audit) : undefined
+            if (streamAudit) {
+              this.observeAudit({ ...streamAudit, phase: 'created' })
+              this.observeAudit({ ...streamAudit, phase: 'handed_off' })
+            }
             try {
-              await taken.stream.finish(bubbles[0] ?? finalText)
-               this.recordDeliveryReceipt(sessionId, event.data?.turn, taken.stream.receipt?.()?.platformMessageIds)
+              if (streamAudit) {
+                const receipt = await taken.stream.finishWithReceipt!(bubbles[0] ?? finalText)
+                this.observeAudit(receipt.platformMessageId
+                  ? { ...streamAudit, phase: 'result', outcome: 'acknowledged', platformMessageId: receipt.platformMessageId }
+                  : { ...streamAudit, phase: 'result', outcome: 'unknown' })
+              } else await taken.stream.finish(bubbles[0] ?? finalText)
+              this.recordDeliveryReceipt(sessionId, event.data?.turn, taken.stream.receipt?.()?.platformMessageIds)
             } catch (error) {
+              if (streamAudit) this.observeAudit({ ...streamAudit, phase: 'result', outcome: 'unknown' })
               // 请求可能已经到达渠道，不能自动补一份重复回复。
               this.log(`[${channel.id}] 流式收口结果未知，请通过 /delivery 查询: ${error instanceof Error ? error.message : String(error)}`)
               delivered = false
@@ -1449,7 +1468,7 @@ export class ImEngine {
               this.streams.markDelivered(streamKey, sessionId)
             }
             if (delivered && bubbles.length > 1) {
-              if (!await this.deliverSegments(channel, binding.chatId, bubbles.slice(1), outcome)) {
+              if (!await this.deliverSegments(channel, binding.chatId, bubbles.slice(1), outcome, audit)) {
                 delivered = false
                 this.streams.markDelivered(streamKey, sessionId)
               }
@@ -1471,9 +1490,9 @@ export class ImEngine {
           this.log(`[${channel.id}] 准备回复 ${sessionId}，长度 ${text.length}${bubbles.length > 1 ? `，分 ${bubbles.length} 条` : ''}`)
           let delivered = bubbles.length > 1
             ? await this.pauseBeforeSegment(channel.id)
-              && await this.deliver(channel, binding.chatId, bubbles[0] ?? text, outcome)
-            : await this.deliver(channel, binding.chatId, bubbles[0] ?? text, outcome)
-          if (delivered && bubbles.length > 1) delivered = await this.deliverSegments(channel, binding.chatId, bubbles.slice(1), outcome)
+              && await this.deliver(channel, binding.chatId, bubbles[0] ?? text, outcome, audit)
+            : await this.deliver(channel, binding.chatId, bubbles[0] ?? text, outcome, audit)
+          if (delivered && bubbles.length > 1) delivered = await this.deliverSegments(channel, binding.chatId, bubbles.slice(1), outcome, audit)
           outcome.ok = outcome.ok && delivered
            this.recordDeliveryReceipt(sessionId, event.data?.turn, outcome.platformMessageIds)
         } else {
@@ -1633,13 +1652,13 @@ export class ImEngine {
   }
 
   /** 逐片发送；返回是否至少送达过一片，供调用方决定是否标记已投递。 */
-  private async deliver(channel: ChannelAdapter, chatId: string, text: string, outcome?: DeliveryOutcome): Promise<boolean> {
+  private async deliver(channel: ChannelAdapter, chatId: string, text: string, outcome?: DeliveryOutcome, audit?: DeliveryAuditIdentity): Promise<boolean> {
     let deliveredAny = false
     let ambiguous = false
     // 重试预算按整条回复共享：钱花在第一个被拒的分片上，窗口一开后面的分片自然跟上。
     const deadline = Date.now() + SEND_RETRY_BUDGET_MS
     for (const chunk of splitText(text, channel.maxMessageLength)) {
-      const result = await this.sendChunk(channel, chatId, chunk, deadline)
+      const result = await this.sendChunk(channel, chatId, chunk, deadline, audit)
       if (result.ok) {
         deliveredAny = true
         if (result.receipt?.platformMessageIds?.length && outcome) outcome.platformMessageIds = [...(outcome.platformMessageIds ?? []), ...result.receipt.platformMessageIds]
@@ -1676,6 +1695,7 @@ export class ImEngine {
     chatId: string,
     segments: string[],
     outcome?: DeliveryOutcome,
+    audit?: DeliveryAuditIdentity,
   ): Promise<boolean> {
     const config = this.resolveConfig(channel.id)
     const minSecs = Math.max(0, config.segmentDelayMinSecs ?? DEFAULT_SEGMENT_DELAY_MIN_SECS)
@@ -1688,7 +1708,7 @@ export class ImEngine {
         // dispose 会中止 recoveryScope，等待随之立即结束，不拖住插件卸载。
         try { await sleepWithSignal(delay, this.recoveryScope.signal) } catch { return false }
       }
-      if (!await this.deliver(channel, chatId, segment, outcome)) return false
+      if (!await this.deliver(channel, chatId, segment, outcome, audit)) return false
     }
     return true
   }
@@ -1733,7 +1753,25 @@ export class ImEngine {
    * 结果不明的失败（超时、网络中断）立即返回：请求可能已经送达。
    * 等待超过 `deadline` 就放弃，让整条回复的重试开销有上界。
    */
-  private async sendChunk(channel: ChannelAdapter, chatId: string, chunk: string, deadline: number): Promise<{ ok: true; receipt?: DeliveryReceipt } | { ok: false; error: unknown }> {
+  private auditIdentity(audit: DeliveryAuditIdentity): { sessionId: string; turnId: number; requestId: string; deliveryId: string } {
+    const part = audit.part++
+    const deliveryId = audit.seq === undefined ? crypto.randomUUID() : createHash('sha256')
+      .update(JSON.stringify([audit.sessionId, audit.turnId, audit.requestId, audit.seq, part])).digest('hex')
+    return { sessionId: audit.sessionId, turnId: audit.turnId, requestId: audit.requestId, deliveryId }
+  }
+
+  private observeAudit(event: Record<string, unknown>): void {
+    try {
+      const emit = (this.ctx as unknown as { emit?: (name: string, value: object) => unknown }).emit
+      if (emit) void Promise.resolve(emit.call(this.ctx, 'im/delivery-audit', event)).catch(() => undefined)
+    } catch { /* Observers must never affect delivery. */ }
+  }
+
+  private async sendChunk(channel: ChannelAdapter, chatId: string, chunk: string, deadline: number, audit?: DeliveryAuditIdentity): Promise<{ ok: true; receipt?: DeliveryReceipt } | { ok: false; error: unknown }> {
+    const identity = audit && channel.sendWithReceipt ? this.auditIdentity(audit) : undefined
+    const observe = (event: Record<string, unknown>) => this.observeAudit(event)
+    if (identity) observe({ ...identity, phase: 'created' })
+    let handedOff = false
     let error: unknown
     for (const [attempt, delay] of this.sendRetryDelaysMs.entries()) {
       if (attempt > 0) {
@@ -1744,15 +1782,20 @@ export class ImEngine {
         if (this.disposed) break
       }
       try {
-         const receipt = channel.sendWithReceipt
-           ? await channel.sendWithReceipt(chatId, chunk)
-           : (await channel.send(chatId, chunk), undefined)
-         return receipt ? { ok: true, receipt } : { ok: true }
-       } catch (caught) {
-         error = caught
-         if (!isDefiniteSendFailure(caught)) return { ok: false, error }
+        if (identity && !handedOff) { observe({ ...identity, phase: 'handed_off' }); handedOff = true }
+        const receipt = channel.sendWithReceipt ? await channel.sendWithReceipt(chatId, chunk) : (await channel.send(chatId, chunk), undefined)
+        const platformMessageId = receipt?.platformMessageIds?.[0]
+        if (identity) observe(platformMessageId ? { ...identity, phase: 'result', outcome: 'acknowledged', platformMessageId } : { ...identity, phase: 'result', outcome: 'unknown' })
+        return receipt ? { ok: true, receipt } : { ok: true }
+      } catch (caught) {
+        error = caught
+        if (!isDefiniteSendFailure(caught)) {
+          if (identity) observe({ ...identity, phase: 'result', outcome: 'unknown' })
+          return { ok: false, error }
+        }
       }
     }
+    if (identity) observe({ ...identity, phase: 'result', outcome: 'failed' })
     return { ok: false, error }
   }
 

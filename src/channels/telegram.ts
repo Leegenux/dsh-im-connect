@@ -202,6 +202,7 @@ interface OpenReply {
   body: string
   status: string
   last: string
+  verified?: { text: string; platformMessageId: string }
   timer: ReturnType<typeof setTimeout> | undefined
   pendingBody: string | undefined
   inflight: Promise<void>
@@ -425,6 +426,11 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
     if (status === 404) return true
     // 只认「方法不存在」；消息被删/chat 不存在不能当成富文本能力缺失，否则会全局退化为纯文本。
     return /unknown method|unsupported/i.test(error instanceof Error ? error.message : '')
+  }
+
+  function receipt(result: unknown): { platformMessageId?: string } {
+    const id = (result as { message_id?: unknown } | null)?.message_id
+    return typeof id === 'number' && Number.isSafeInteger(id) && id > 0 ? { platformMessageId: String(id) } : {}
   }
 
   async function sendMessageText(chatId: string, text: string): Promise<number | undefined> {
@@ -1294,6 +1300,7 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
           body: '',
           status: '',
           last: firstText,
+          verified: Number.isSafeInteger(first.message_id) && first.message_id > 0 ? { text: firstText, platformMessageId: String(first.message_id) } : undefined,
           timer: undefined,
           pendingBody: undefined,
           inflight: Promise.resolve(),
@@ -1323,12 +1330,15 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
         // 流式中间态不抢配额：抢不到就跳过这一版，下一次 schedule 会带着最新正文再来。
         // 只有收口（allowSend）才值得排队等配额，否则用户会收不到最终回复。
         const budget = { bulk: !allowSend }
+        // An ambiguous edit may have changed the message, invalidating older evidence.
+        current.verified = undefined
         // last 只在发送成功后更新：失败时保留旧值，finish 才能靠 sendMessage 兜底送出全文
         try {
           const markdown = richDisabled ? undefined : toTelegramRichMarkdown(next)
           if (markdown !== undefined) {
             try {
-              await api('editMessageText', { chat_id: route.chatId, message_id: current.messageId, rich_message: { markdown } }, 30_000, undefined, budget)
+              const result = receipt(await api('editMessageText', { chat_id: route.chatId, message_id: current.messageId, rich_message: { markdown } }, 30_000, undefined, budget))
+              if (result.platformMessageId === String(current.messageId)) current.verified = { text: next, platformMessageId: result.platformMessageId }
               current.last = next
               return
             } catch (error) {
@@ -1342,7 +1352,8 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
               if (richUnsupported(error)) richDisabled = true
             }
           }
-          await api('editMessageText', { chat_id: route.chatId, message_id: current.messageId, text: next }, 30_000, undefined, budget)
+          const result = receipt(await api('editMessageText', { chat_id: route.chatId, message_id: current.messageId, text: next }, 30_000, undefined, budget))
+          if (result.platformMessageId === String(current.messageId)) current.verified = { text: next, platformMessageId: result.platformMessageId }
           current.last = next
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error)
@@ -1356,8 +1367,8 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
           if (stopped || (error as { rejected?: boolean })?.rejected !== true
             || Number((error as { status?: number }).status) !== 400
             || !/message to edit not found|message can(?:not|'t) be edited|message_id_invalid/i.test(detail)) throw error
-           const messageId = await sendMessageText(chatId, next)
-           if (messageId !== undefined) current.platformMessageIds.push(String(messageId))
+          const messageId = await sendMessageText(chatId, next)
+          if (messageId !== undefined) { current.platformMessageIds.push(String(messageId)); current.verified = { text: next, platformMessageId: String(messageId) } }
           current.last = next
         }
       }
@@ -1371,6 +1382,24 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
           current.pendingBody = undefined
           if (next !== undefined) current.inflight = current.inflight.then(() => flush(next, false))
         }, 400)
+      }
+
+      const finishWithReceipt = async (text: string): Promise<{ platformMessageId?: string }> => {
+        if (current.closed) throw new Error('telegram reply stream is closed')
+        close()
+        if (current.timer) { clearTimeout(current.timer); current.timer = undefined }
+        await current.inflight.catch(() => undefined)
+        current.status = ''
+        const chars = [...(text || current.body || current.pendingBody || '')]
+        const first = chars.slice(0, 4000).join('')
+        await flush(first, true)
+        for (let offset = 4000; offset < chars.length; offset += 4000) {
+          const messageId = await sendMessageText(chatId, chars.slice(offset, offset + 4000).join(''))
+          if (messageId !== undefined) current.platformMessageIds.push(String(messageId))
+        }
+        // A single platform receipt cannot attest multiple separately sent chunks.
+        return chars.length <= 4000 && current.verified?.text === first
+          ? { platformMessageId: current.verified.platformMessageId } : {}
       }
 
       return {
@@ -1408,24 +1437,8 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
           await current.inflight.catch(() => undefined)
           await api('deleteMessage', { chat_id: route.chatId, message_id: current.messageId }).catch(() => undefined)
         },
-        async finish(text) {
-          if (current.closed) throw new Error('telegram reply stream is closed')
-          close()
-          if (current.timer) {
-            clearTimeout(current.timer)
-            current.timer = undefined
-          }
-          await current.inflight.catch(() => undefined)
-          // 收口只留正文：状态行不能跟着最终回复一起留在聊天里。
-          current.status = ''
-          const chars = [...(text || current.body || current.pendingBody || '')]
-          await flush(chars.slice(0, 4000).join(''), true)
-          // 首段更新原气泡，剩余正文依次发送；全部确认后上层才将完整正文记为已送达。
-          for (let offset = 4000; offset < chars.length; offset += 4000) {
-             const messageId = await sendMessageText(chatId, chars.slice(offset, offset + 4000).join(''))
-             if (messageId !== undefined) current.platformMessageIds.push(String(messageId))
-          }
-        },
+        async finish(text) { await finishWithReceipt(text) },
+        finishWithReceipt,
       }
     },
     sendThinking(chatId, text, options) {
