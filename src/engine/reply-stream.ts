@@ -54,7 +54,7 @@ export class ReplyStreamHub {
   }
 
   /** 只更新状态行，不碰正文；和正文增量共用一条串行队列，避免错序。 */
-  onStatus(key: string, status: string, start: () => Promise<ReplyStream | undefined>, sessionId?: string): Promise<void> {
+  onStatus(key: string, status: string, start: () => Promise<ReplyStream | undefined>, sessionId?: string, codeFrom?: number): Promise<void> {
     if (sessionId !== undefined) {
       const owner = this.owners.get(key)
       if (owner !== undefined && owner !== sessionId) this.reset(key)
@@ -82,7 +82,8 @@ export class ReplyStreamHub {
         this.texts.set(key, '')
         this.delivered.delete(key)
       }
-      await stream.setStatus?.(status)
+      if (codeFrom === undefined) await stream.setStatus?.(status)
+      else await stream.setStatus?.(status, codeFrom)
     })
     this.tails.set(key, next)
     return next
