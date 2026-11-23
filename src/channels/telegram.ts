@@ -95,11 +95,6 @@ const STATUS_REACTION_DELAYS_MS = [400, 1200] as const
  * 放宽到 6 秒仍然有界，不会堆积请求。
  */
 const TYPING_REQUEST_TIMEOUT_MS = 6000
-/**
- * typing 自己吃到 429 后的退避上限。正文 / 编辑的冷却再长也不牵连 typing：
- * 一个群被编辑限流几十秒时，「正在输入」不该跟着整段消失。
- */
-const TYPING_COOLDOWN_MAX_MS = 30_000
 
 function isTerminalStatus(state: string): boolean {
   return state === 'success' || state === 'ended' || state === 'error' || state === 'cancelled'
