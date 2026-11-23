@@ -3097,6 +3097,10 @@ window.__ModuleLoader__.load({
         "time.years": "{n} a",
       },
     };
+    for (const labels of Object.values(IM_LOCALES)) Object.assign(labels, {
+      "account.topicNaming": "Automatically sync topic names", "account.topicNamingOn": "On", "account.topicNamingOff": "Off", "account.topicNamingCadence": "Sync mode", "account.topicNamingOnce": "First title only", "account.topicNamingFollow": "Follow latest", "account.topicNamingNote": "DSH titles are unchanged; /rename remains available for manual syncing."
+    });
+    Object.assign(IM_LOCALES.zh, { "account.topicNaming": "自动同步话题名称", "account.topicNamingOn": "开启", "account.topicNamingOff": "关闭", "account.topicNamingCadence": "同步方式", "account.topicNamingOnce": "仅首次", "account.topicNamingFollow": "跟随最新", "account.topicNamingNote": "DSH 会话标题不受影响；仍可使用 /rename 手动同步。" });
     const fallbackT = (key) => key;
     const h = React.createElement;
 
@@ -3904,6 +3908,7 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
       const [success, setSuccess] = useState("");
       const modelTouched = useRef(false);
       const workspaceTouched = useRef(false);
+      const topicNamingTouched = useRef(false);
       const [settings, setSettings] = useState(() => {
         const assistant = preferredAssistant(defaults, readMainSessionModel);
         return {
@@ -3935,6 +3940,9 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
         setSettings((current) => current.cwd === next ? current : { ...current, cwd: next });
       }, [defaults, workspaces]);
 
+      const defaultTopicNaming = defaults && (defaults.topicNaming === "follow" || defaults.topicNaming === "off") ? defaults.topicNaming : "once";
+      const topicNaming = topicNamingTouched.current ? (settings.topicNaming === "follow" || settings.topicNaming === "off" ? settings.topicNaming : "once") : defaultTopicNaming;
+      const settingsForSave = () => { const next = { ...settings }; if (topicNamingTouched.current) next.topicNaming = topicNaming; else delete next.topicNaming; return next; };
       const startQr = useCallback((refresh) => {
               if (!hasQr || !workspaceIsListed(settings.cwd, workspaces)) return;
         setQrStarted(true);
@@ -3944,7 +3952,7 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
         api(`/channels/${ch.id}/qr/${refresh ? "refresh" : "start"}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ settings }),
+          body: JSON.stringify({ settings: settingsForSave() }),
         }).then((data) => {
           if (!alive.current) return;
           if (!data.ok && !data.pairing) setError(serverText(data.error, t) || t("error.qr"));
@@ -4018,7 +4026,7 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
         api(`/channels/${ch.id}/connect`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-           body: JSON.stringify({ config, settings }),
+           body: JSON.stringify({ config, settings: settingsForSave() }),
         }).then((data) => {
           if (!data.ok) setError(serverText(data.error, t) || t("error.save"));
           else {
@@ -4077,8 +4085,9 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
         success && h(NoticeBar, { type: "success" }, success),
         h("div", { className: "ima-setup-section" },
           h(AccountSettingsPicker, {
-            value: settings,
+            value: { ...settings, platform: ch.id, topicNaming },
             onChange: (patch) => {
+              if (patch && Object.prototype.hasOwnProperty.call(patch, "topicNaming")) topicNamingTouched.current = true;
               if (patch && patch.cwd !== undefined) workspaceTouched.current = true;
               if (patch && (patch.provider !== undefined || patch.model !== undefined)) modelTouched.current = true;
               setSettings((current) => ({ ...current, ...patch }));
@@ -4241,6 +4250,8 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
       const permission = value.permission || "";
       const privateAccess = value.privateAccess === "all" ? "all" : "approved";
       const sendMode = value.sendMode === "steer" ? "steer" : "queue";
+      const telegram = value.platform === "telegram";
+      const topicNaming = value.topicNaming === "off" || value.topicNaming === "follow" ? value.topicNaming : "once";
       const segmentSupported = typeof props.segmentReplySupported === "boolean"
         ? props.segmentReplySupported
         : supportsSegmentReply(value.platform);
@@ -4551,6 +4562,9 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
           ],
           onChange: (next) => update({ sendMode: next }),
         })),
+        telegram && field("topicNaming", t("account.topicNaming"), h(Select, { className: "ima-account-picker", value: topicNaming === "off" ? "off" : "on", "aria-label": t("account.topicNaming"), options: [{ value: "on", label: t("account.topicNamingOn") }, { value: "off", label: t("account.topicNamingOff") }], onChange: (next) => update({ topicNaming: next === "off" ? "off" : (topicNaming === "follow" ? "follow" : "once") }) })),
+        telegram && topicNaming !== "off" && field("topicNamingCadence", t("account.topicNamingCadence"), h(Select, { className: "ima-account-picker", value: topicNaming, "aria-label": t("account.topicNamingCadence"), options: [{ value: "once", label: t("account.topicNamingOnce") }, { value: "follow", label: t("account.topicNamingFollow") }], onChange: (next) => update({ topicNaming: next === "follow" ? "follow" : "once" }) })),
+        telegram && h("div", { className: "ima-picker-note" }, t("account.topicNamingNote")),
         field("sessionIdle", sessionIdleLabel, h(Select, {
           className: "ima-account-picker",
           value: String(sessionIdleMinutes),
@@ -4756,7 +4770,7 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
         setDraft(account);
         setProxyModeDraft(account.proxyMode || "inherit");
         setNote("");
-      }, [account.id, account.cwd, account.permission, account.agentPreset, account.privateAccess, account.sendMode, account.sessionIdleMinutes, account.segmentReply, account.segmentDelayMinSecs, account.segmentDelayMaxSecs, account.proxyMode, account.proxyConfigured, JSON.stringify(account.commandPermissions), account.receiveEnabled, account.threadSessions, account.assistant && account.assistant.provider, account.assistant && account.assistant.model, account.assistant && account.assistant.reasoningEffort, account.thinkingDisplay]);
+      }, [account.id, account.cwd, account.permission, account.agentPreset, account.privateAccess, account.sendMode, account.sessionIdleMinutes, account.segmentReply, account.segmentDelayMinSecs, account.segmentDelayMaxSecs, account.proxyMode, account.proxyConfigured, JSON.stringify(account.commandPermissions), account.receiveEnabled, account.topicNaming, account.threadSessions, account.assistant && account.assistant.provider, account.assistant && account.assistant.model, account.assistant && account.assistant.reasoningEffort, account.thinkingDisplay]);
       useEffect(() => {
         if (accountIdRef.current !== account.id) {
           accountIdRef.current = account.id;
@@ -4800,6 +4814,7 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
           }
         }
         if (account.platform === "telegram") {
+          if (Object.prototype.hasOwnProperty.call(patch, "topicNaming")) payload.topicNaming = patch.topicNaming;
           const hasMentionPatch = Object.prototype.hasOwnProperty.call(patch, "mentionPolicy") || Object.prototype.hasOwnProperty.call(patch, "freeChatGroups");
           if (hasMentionPatch) {
             payload.mentionPolicy = Object.prototype.hasOwnProperty.call(patch, "mentionPolicy") ? patch.mentionPolicy : (mentionPolicyDraft === "always" ? "always" : "addressed");
@@ -4827,7 +4842,10 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
         };
         filterPayload(account.platform, patch, payload);
         return onSave(account.id, payload).then((ok) => {
-          if (seq === saveSeq.current) setNote(ok ? "status.saved" : "error.save");
+          if (seq === saveSeq.current) {
+            setNote(ok ? "status.saved" : "error.save");
+            if (!ok && Object.prototype.hasOwnProperty.call(patch, "topicNaming")) setDraft((current) => ({ ...current, topicNaming: draft.topicNaming }));
+          }
           return ok;
         });
       };
