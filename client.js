@@ -6889,9 +6889,26 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
       return { id: TELEGRAM_SOURCE_ID, start: 0, end: position, data: { sources } };
     }
     function TelegramSourceDetails({ node }) {
-      return React.createElement("details", { style: { display: "inline-block", verticalAlign: "top", maxWidth: "100%" } },
-        React.createElement("summary", null, "Telegram 来源"),
-        React.createElement("pre", { style: { whiteSpace: "pre-wrap", overflowWrap: "anywhere" } }, JSON.stringify(node.data.sources, null, 2)));
+      const [open, setOpen] = useState(false);
+      const title = "Telegram 来源";
+      const payload = React.createElement("pre", {
+        style: { margin: 0, whiteSpace: "pre-wrap", overflowWrap: "anywhere" },
+      }, JSON.stringify(node.data.sources, null, 2));
+      const DisclosureRow = primitives.DisclosureRow;
+      const details = DisclosureRow
+        ? React.createElement(DisclosureRow, {
+          title,
+          icon: primitives.IconContextInjectionOutlineRegular
+            ? React.createElement(primitives.IconContextInjectionOutlineRegular) : null,
+          open,
+          expandable: true,
+          expandOnRowClick: true,
+          onToggle: () => setOpen(current => !current),
+        }, payload)
+        : React.createElement("details", null, React.createElement("summary", null, title), payload);
+      // The host slot is inline. Put the disclosure on its own line so expanding
+      // the metadata never moves the following message body alongside it.
+      return React.createElement("span", { style: { display: "block", minWidth: 0, maxWidth: "100%" } }, details);
     }
     function registerTelegramSourceDetails(ctx) {
       if (typeof ctx.uiConversation?.userText?.register !== "function") return;

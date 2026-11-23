@@ -8,12 +8,16 @@ let definition
 const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
   .replace('    var module = { exports: {} };', '    const resolveApiUrl = () => ""; const setupPluginUpdate = () => {}; var module = { exports: {} };')
 new Function('window', source)({ __ModuleLoader__: { load(value) { definition = value } } })
-const client = definition.factory(id => {
-  if (id === 'react') return React
-  if (id === 'react-dom') return {}
-  if (id.startsWith('@deepseek-ai/')) return {}
-  throw new Error(`unexpected dependency: ${id}`)
-})
+function loadClient(primitives = {}) {
+  return definition.factory(id => {
+    if (id === 'react') return React
+    if (id === 'react-dom') return {}
+    if (id === '@deepseek-ai/dsh-client-ui-primitives') return primitives
+    if (id.startsWith('@deepseek-ai/')) return {}
+    throw new Error(`unexpected dependency: ${id}`)
+  })
+}
+const client = loadClient()
 const block = data => `[IM_SOURCE_DATA]\n${JSON.stringify(data)}\n[/IM_SOURCE_DATA]`
 const compact = { platform: 'telegram', senderId: '12', messageId: '34', replyToMessageId: null }
 const legacy = { ...compact, accountId: 'bot', route: '-123:4', chatTitle: 'A group', adapterCapabilities: { text: true } }
@@ -33,6 +37,24 @@ test('leading legacy and compact source blocks become collapsed details without 
     assert.doesNotMatch(html, /<details[^>]* open/)
     assert.match(html, /telegram/)
   }
+})
+
+test('uses the host disclosure in its own line and starts closed', () => {
+  function DisclosureRow({ title, open, expandable, expandOnRowClick, children }) {
+    assert.equal(expandable, true)
+    assert.equal(expandOnRowClick, true)
+    return React.createElement('div', null,
+      React.createElement('button', { 'aria-expanded': open }, title),
+      open && children)
+  }
+  const native = loadClient({ DisclosureRow: React.memo(DisclosureRow) })
+  const node = match(`${block(compact)}\nmessage body`)
+  const html = renderToStaticMarkup(React.createElement('span', null,
+    React.createElement(native.TelegramSourceDetails, { node }), 'message body'))
+  assert.match(html, /display:block/)
+  assert.match(html, /aria-expanded="false">Telegram 来源<\/button>/)
+  assert.match(html, /<\/div><\/span>message body/)
+  assert.doesNotMatch(html, /<details|<pre|senderId/)
 })
 
 test('merged legacy blocks fold the exact wrapper while retaining continuous body and source spans', () => {
