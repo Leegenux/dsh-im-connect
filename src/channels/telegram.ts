@@ -201,7 +201,9 @@ interface OpenReply {
   platformMessageIds: string[]
   body: string
   status: string
+  statusCodeFrom?: number
   last: string
+  lastCodeFrom?: number
   verified?: { text: string; platformMessageId: string }
   timer: ReturnType<typeof setTimeout> | undefined
   pendingBody: string | undefined
@@ -1320,15 +1322,14 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
         if (openReplies.get(chatId) === current) openReplies.delete(chatId)
       }
       /** 状态行在上、正文在下，合成同一条消息；状态为空时只剩正文。 */
-      const compose = (nextBody: string) => {
+      const flush = async (nextBody: string, allowSend: boolean) => {
         const head = current.status.trim()
         const text = head ? (nextBody ? `${head}\n\n${nextBody}` : head) : nextBody
-        return [...(text || '')].slice(0, 4000).join('') || '…'
-      }
-
-      const flush = async (nextBody: string, allowSend: boolean) => {
-        const next = compose(nextBody)
-        if (next === current.last) return
+        const next = [...(text || '')].slice(0, 4000).join('') || '…'
+        const offset = current.statusCodeFrom
+        const statusEnd = Math.min(head.length, next.length)
+        const codeFrom = offset !== undefined && offset >= 0 && offset < statusEnd ? offset : undefined
+        if (next === current.last && codeFrom === current.lastCodeFrom) return
         // 流式中间态不抢配额：抢不到就跳过这一版，下一次 schedule 会带着最新正文再来。
         // 只有收口（allowSend）才值得排队等配额，否则用户会收不到最终回复。
         const budget = { bulk: !allowSend }
@@ -1336,17 +1337,37 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
         current.verified = undefined
         // last 只在发送成功后更新：失败时保留旧值，finish 才能靠 sendMessage 兜底送出全文
         try {
-          const markdown = richDisabled ? undefined : toTelegramRichMarkdown(next)
-          if (markdown !== undefined) {
+          let richMessage: Record<string, unknown> | undefined
+          if (!richDisabled) {
+            if (codeFrom === undefined) {
+              const markdown = toTelegramRichMarkdown(next)
+              if (markdown !== undefined) richMessage = { markdown }
+            } else {
+              const prefix = next.slice(0, codeFrom)
+              const preview = next.slice(codeFrom, statusEnd)
+              const body = next.slice(statusEnd + 2)
+              if (!body.trim()) {
+                richMessage = { blocks: [{ type: 'paragraph', text: [prefix, { type: 'code', text: preview }] }] }
+              } else {
+                const markdown = toTelegramRichMarkdown(body)
+                // Escape Markdown punctuation and HTML metacharacters in the status independently of the body.
+                const literal = (value: string) => value.replace(/[!-\/:-@\[-`{-~]/g, ch => `&#${ch.charCodeAt(0)};`)
+                if (markdown !== undefined) richMessage = { markdown: `${literal(prefix)}<code>${literal(preview)}</code>\n\n${markdown}` }
+              }
+            }
+          }
+          if (richMessage !== undefined) {
             try {
-              const result = receipt(await api('editMessageText', { chat_id: route.chatId, message_id: current.messageId, rich_message: { markdown } }, 30_000, undefined, budget))
+              const result = receipt(await api('editMessageText', { chat_id: route.chatId, message_id: current.messageId, rich_message: richMessage }, 30_000, undefined, budget))
               if (result.platformMessageId === String(current.messageId)) current.verified = { text: next, platformMessageId: result.platformMessageId }
               current.last = next
+              current.lastCodeFrom = codeFrom
               return
             } catch (error) {
               // A confirmed no-op is success; only rich-format rejection permits plain fallback.
               if (error instanceof Error && error.message.includes('message is not modified')) {
                 current.last = next
+                current.lastCodeFrom = codeFrom
                 return
               }
               if ((error as { rejected?: boolean })?.rejected !== true
@@ -1357,10 +1378,12 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
           const result = receipt(await api('editMessageText', { chat_id: route.chatId, message_id: current.messageId, text: next }, 30_000, undefined, budget))
           if (result.platformMessageId === String(current.messageId)) current.verified = { text: next, platformMessageId: result.platformMessageId }
           current.last = next
+          current.lastCodeFrom = codeFrom
         } catch (error) {
           const detail = error instanceof Error ? error.message : String(error)
           if (detail.includes('message is not modified')) {
             current.last = next
+            current.lastCodeFrom = codeFrom
             return
           }
           if (!allowSend) return
@@ -1372,6 +1395,7 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
           const messageId = await sendMessageText(chatId, next)
           if (messageId !== undefined) { current.platformMessageIds.push(String(messageId)); current.verified = { text: next, platformMessageId: String(messageId) } }
           current.last = next
+          current.lastCodeFrom = codeFrom
         }
       }
 
@@ -1420,9 +1444,10 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
           schedule(text)
         },
         /** 只改顶部状态行，正文保持累积值；空串表示清除状态。 */
-        async setStatus(text) {
+        async setStatus(text, codeFrom) {
           if (current.closed) return
           current.status = text ?? ''
+          current.statusCodeFrom = codeFrom
           schedule(current.body)
         },
          receipt() {

@@ -18,7 +18,7 @@ export declare class ReplyStreamHub {
     statusOf(key: string): string | undefined;
     onTextDelta(key: string, delta: string, start: () => Promise<ReplyStream | undefined>, sessionId?: string): Promise<void>;
     /** 只更新状态行，不碰正文；和正文增量共用一条串行队列，避免错序。 */
-    onStatus(key: string, status: string, start: () => Promise<ReplyStream | undefined>, sessionId?: string): Promise<void>;
+    onStatus(key: string, status: string, start: () => Promise<ReplyStream | undefined>, sessionId?: string, codeFrom?: number): Promise<void>;
     take(key: string, sessionId?: string): Promise<{
         stream?: ReplyStream;
         text: string;
