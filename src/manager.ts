@@ -678,7 +678,8 @@ export class ChannelManager {
         register(route: {
           kind: string
           path: string
-          handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse) => void
+          auth: 'required'
+          handler: (req: import('node:http').IncomingMessage, res: import('node:http').ServerResponse, peer?: { principal: { kind: string } }) => void
         }): (() => void) | void
       }
     }).webServer
@@ -972,20 +973,28 @@ export class ChannelManager {
     const dispose = webServer.register({
       kind: 'prefix',
       path: basePath,
-      handler: async (req, res) => {
+      auth: 'required',
+      handler: async (req, res, peer) => {
         try {
-          // 动态读取活动服务，并保留 requestRejection 的 this 绑定。
-          const connection = (typeof ctx.get === 'function' ? ctx.get('connection') : undefined) as {
-            requestRejection?: (request: { headers: typeof req.headers }) => 401 | 403 | undefined
-          } | undefined
-          if (typeof connection?.requestRejection !== 'function') {
-            send(res, 503, { ok: false, error: '宿主认证服务尚未就绪或版本不支持；请稍后重试或升级宿主。 / Retry or upgrade DSH to enable authenticated management.' })
-            return
-          }
-          const rejection = connection.requestRejection(req)
-          if (rejection !== undefined) {
-            send(res, rejection, { ok: false, error: rejection === 401 ? '请先登录 DSH / Sign in to DSH first' : '宿主拒绝此 Host 或跨站请求 / Host or cross-site request forbidden' })
-            return
+          if (peer !== undefined) {
+            if (peer.principal?.kind !== 'owner') {
+              send(res, 403, { ok: false, error: '仅宿主所有者可管理 IM 账号 / Only the host owner can manage IM accounts' })
+              return
+            }
+          } else {
+            // 旧版宿主不传入 Peer，继续使用其认证服务并保留 this 绑定。
+            const connection = (typeof ctx.get === 'function' ? ctx.get('connection') : undefined) as {
+              requestRejection?: (request: { headers: typeof req.headers }) => 401 | 403 | undefined
+            } | undefined
+            if (typeof connection?.requestRejection !== 'function') {
+              send(res, 503, { ok: false, error: '宿主认证服务尚未就绪或版本不支持；请稍后重试或升级宿主。 / Retry or upgrade DSH to enable authenticated management.' })
+              return
+            }
+            const rejection = connection.requestRejection(req)
+            if (rejection !== undefined) {
+              send(res, rejection, { ok: false, error: rejection === 401 ? '请先登录 DSH / Sign in to DSH first' : '宿主拒绝此 Host 或跨站请求 / Host or cross-site request forbidden' })
+              return
+            }
           }
           const requestError = validateApiMutation(req)
           if (requestError) { send(res, requestError.status, { ok: false, error: requestError.error }); return }
