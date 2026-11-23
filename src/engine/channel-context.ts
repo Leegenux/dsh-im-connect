@@ -62,7 +62,7 @@ export function messageSourceData(channel: ChannelAdapter, message: ImMessage): 
     topicNameObservedAt: timestamp(context?.topicNameObservedAt),
     senderId: numericId(message.userId),
     senderDisplayName: display(context?.senderDisplayName),
-    senderUsername: display(context?.senderUsername ?? message.username),
+    senderUsername: display(context?.senderUsername),
     messageId: numericId(message.platformMessageId),
     replyToMessageId: numericId(context?.replyToMessageId),
     eventId: display(message.messageId),
@@ -71,8 +71,17 @@ export function messageSourceData(channel: ChannelAdapter, message: ImMessage): 
     adapterCapabilities: capabilities(channel),
   }
 }
+function compactSourceData(channel: ChannelAdapter, message: ImMessage): Record<string, unknown> | undefined {
+  const full = messageSourceData(channel, message)
+  if (!full) return undefined
+  const data: Record<string, unknown> = { platform: 'telegram' }
+  for (const key of ['senderId', 'senderDisplayName', 'senderUsername', 'messageId', 'replyToMessageId']) {
+    if (full[key] != null) data[key] = full[key]
+  }
+  return data
+}
 export function messageSourceBlock(channel: ChannelAdapter, message: ImMessage): string {
-  const data = messageSourceData(channel, message)
+  const data = compactSourceData(channel, message)
   return data ? `[IM_SOURCE_DATA]\n${dataJson(data)}\n[/IM_SOURCE_DATA]` : ''
 }
 /** Keep merged words/code intact. Source spans address the unchanged body, not inserted decorations. */
@@ -80,9 +89,9 @@ export function inboundContextText(channel: ChannelAdapter, message: ImMessage, 
   const body = message.text.trim()
   if (channel.platform !== 'telegram') return body
   const sameRoute = sources.filter(source => source.chatId === message.chatId && (source.kind === 'group') === (message.kind === 'group'))
-  const originals = sameRoute.length === sources.length && sources.length > 0 ? sameRoute : [message]
-  if (originals.length === 1) return [messageSourceBlock(channel, originals[0]!), body].filter(Boolean).join('\n')
-  if (originals.map(source => source.text).join('') !== message.text) {
+  const originals = sameRoute.length === sources.length && sources.length > 0 ? sameRoute : []
+  if (originals.length === 1 && originals[0]!.text === message.text) return [messageSourceBlock(channel, originals[0]!), body].filter(Boolean).join('\n')
+  if (originals.length === 0 || originals.map(source => source.text).join('') !== message.text) {
     // Fail closed on an unexpected merge contract: preserve body, but do not invent source spans/senders.
     const unknownSource = { ...message, userId: undefined, username: undefined, messageId: undefined, platformMessageId: undefined, channelContext: undefined }
     return [messageSourceBlock(channel, unknownSource), body].filter(Boolean).join('\n')
@@ -94,7 +103,7 @@ export function inboundContextText(channel: ChannelAdapter, message: ImMessage, 
     offset += source.text.length
     const end = Math.max(0, Math.min(body.length, offset - trimStart))
     if (end <= start) return ''
-    const data = messageSourceData(channel, source)
+    const data = compactSourceData(channel, source)
     return data ? `[IM_SOURCE_DATA]\n${dataJson({ ...data, bodySpan: { start, end, unit: 'utf16' } })}\n[/IM_SOURCE_DATA]` : ''
   }).filter(Boolean)
   return observations.length > 0
