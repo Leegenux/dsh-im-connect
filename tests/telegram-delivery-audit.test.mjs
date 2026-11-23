@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -10,17 +10,16 @@ import { SessionMapStore } from '../lib/engine/session-store.js'
 import { SeenStore } from '../lib/engine/seen-store.js'
 import { createTelegramChannel } from '../lib/channels/telegram.js'
 
-async function fixture(t, { result = { message_id: 123 }, networkFailure = false, rejected = false, ambiguous = false, observerThrows = false, text = 'private answer', seq = 7, paths = [] } = {}) {
+async function fixture(t, { result = { message_id: 123 }, networkFailure = false, rejected = false, ambiguous = false, observerThrows = false, text = 'private answer', seq = 7, paths = [], sessionId = 'audit-session', summaryTurn = 1 } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'telegram-audit-'))
-  const sessionId = 'audit-session'
   const store = new SessionMapStore(join(dir, 'sessions.json'))
   store.upsert('telegram:dm:42', { sessionId, channel: 'telegram', kind: 'dm', chatId: '42', title: 'test', updatedAt: new Date().toISOString() })
   const handlers = {}, events = [], calls = [], logs = []
   const ctx = { on(name, fn) { handlers[name] = fn; return () => {} }, emit(name, event) { events.push([name, event]); if (observerThrows) throw Error('observer'); return handlers[name]?.(event) }, get(name) { return name === 'workspaceFiles' ? { readAll: async () => ({ data: Buffer.from('file bytes').toString('base64'), eof: true, offset: 0 }) } : undefined } }
-  const engine = new ImEngine(ctx, store, new SeenStore(join(dir, 'seen.json')), { cwd: dir, provider: 'p', model: 'm', agentPreset: 'standard', mergeTimeoutSecs: 1, permissionPreset: 'danger-full-access' }, line => logs.push(line), undefined, undefined, undefined, undefined, undefined, [0])
+  const engine = new ImEngine(ctx, store, new SeenStore(join(dir, 'seen.json')), { cwd: dir, provider: 'p', model: 'm', agentPreset: 'standard', mergeTimeoutSecs: 1, permissionPreset: 'danger-full-access' }, line => logs.push(line), undefined, undefined, undefined, undefined, join(dir, 'deliveries.json'), [0])
   const originalFetch = globalThis.fetch
   globalThis.fetch = async (url, init) => {
-    calls.push({ method: String(url).split('/').at(-1), body: init.body instanceof FormData ? Object.fromEntries(init.body) : JSON.parse(init.body) })
+    calls.push({ method: String(url).split('/').at(-1), body: init.body instanceof FormData ? Object.fromEntries(init.body) : JSON.parse(init.body), journal: JSON.parse(readFileSync(join(dir, 'deliveries.json'), 'utf8')) })
     if (networkFailure) throw new TypeError('connection lost')
     if (rejected) return new Response(JSON.stringify({ ok: false, error_code: 429, parameters: { retry_after: 120 } }), { status: 429 })
     return new Response(JSON.stringify({ ok: true, result }), { status: 200, headers: { 'content-type': 'application/json' } })
@@ -30,7 +29,7 @@ async function fixture(t, { result = { message_id: 123 }, networkFailure = false
   channel.authorizes = () => true
   engine.register(channel)
   engine.deferred.begin('request-1', sessionId, 'telegram', { chatId: '42', userId: 'user-1', kind: 'dm', text: '' })
-  engine.deferred.claim(sessionId, 1, 'request-1')
+  engine.deferred.claim(sessionId, summaryTurn, 'request-1')
   if (ambiguous) { engine.deferred.begin('request-2', sessionId, 'telegram', { chatId: '42', userId: 'user-1', kind: 'dm', text: '' }); engine.deferred.claim(sessionId, 1, 'request-2') }
   t.after(async () => { engine.dispose(); await channel.stop(); globalThis.fetch = originalFetch; rmSync(dir, { recursive: true, force: true }) })
   const sendDirect = () => engine.processSessionEvent({ id: sessionId, header: { cwd: dir }, events: [{ type: 'deliverables/presented', data: { turn: 1, files: paths.map(path => ({ path })) } }] }, { type: 'assistant/message', seq, surfaceOp: 'append', data: { turn: 1, message: { content: [{ type: 'text', text }] } } }, { ok: true })
@@ -230,6 +229,59 @@ test('replay audit requires an exact single request and known turn', async t => 
     const f = await fixture(t, { networkFailure: true }); await f.replay()
     assert.equal(f.events.at(-1)[1].outcome, 'unknown')
     assert.equal(f.engine.deferred.list()[0].status, 'unknown')
+  })
+})
+
+test('summary event uses the exact Telegram request and persists before send', async t => {
+  for (const networkFailure of [false, true]) await t.test(networkFailure ? 'unknown' : 'success', async t => {
+    const f = await fixture(t, { networkFailure })
+    const event = { sessionId: 'audit-session', turnId: 1, summaryId: 'stable-summary', text: 'turn summary' }
+    await Promise.all([f.handlers['hermes/turn-summary'](event), f.handlers['hermes/turn-summary'](event)])
+    assert.equal(f.calls.length, 1)
+    assert.equal(f.events.at(-1)[1].outcome, networkFailure ? 'unknown' : 'acknowledged')
+    const recovered = new (await import('../lib/engine/deferred-delivery.js')).DeferredDelivery(join(f.dir, 'deliveries.json'))
+    const identity = (await import('node:crypto')).createHash('sha256').update(JSON.stringify(['hermes-summary', 'audit-session', 1, 'stable-summary'])).digest('hex')
+    assert.equal(recovered.beginSummary(identity, 'audit-session', 1, 'request-1', 'turn summary'), false)
+    await f.handlers['hermes/turn-summary'](event)
+    assert.equal(f.calls.length, 1)
+  })
+})
+
+test('fixed host summaries replay into Telegram and the Hermes report', { skip: !process.env.HERMES_SUMMARY_FIXTURE || !process.env.HERMES_AUDIT_TEST_ROOT }, async t => {
+  const [committed, staged] = JSON.parse(readFileSync(process.env.HERMES_SUMMARY_FIXTURE, 'utf8'))
+  const load = relative => import(pathToFileURL(resolve(process.env.HERMES_AUDIT_TEST_ROOT, relative)))
+  const { apply } = await load('src/index.mjs')
+  const { readAuditReport } = await load('scripts/audit-report.mjs')
+  for (const [label, event, networkFailure] of [['committed', committed, false], ['staged', staged, false], ['timeout', committed, true]]) {
+    await t.test(label, async t => {
+      const f = await fixture(t, { sessionId: event.sessionId, summaryTurn: event.turnId, networkFailure })
+      const disposers = [], listeners = new Map(), pending = []
+      const root = join(f.dir, 'audit')
+      apply({ on(name, listener) { listeners.set(name, listener) }, effect(factory) { disposers.push(factory()) }, logger: { warn() {} } }, { auditRoot: root })
+      try {
+        f.handlers['im/delivery-audit'] = audit => { pending.push(listeners.get('im/delivery-audit')(audit)) }
+        await Promise.all([f.handlers['hermes/turn-summary'](event), f.handlers['hermes/turn-summary'](event)])
+        await Promise.all(pending)
+        assert.equal(f.calls.length, 1)
+        assert.equal(f.calls[0].journal.summaries[0].text, event.text)
+        const report = readAuditReport(root, { trace: event.summaryId })
+        assert.equal(report.coverage.complete, true)
+        assert.equal(report.deliveries.length, 1)
+        assert.equal(report.deliveries[0].outcome, networkFailure ? 'unknown' : 'acknowledged')
+        assert.equal(report.deliveries[0].firstGap, null)
+      } finally {
+        for (const dispose of disposers.reverse()) await dispose()
+      }
+    })
+  }
+})
+
+test('summary fails closed on ambiguous or unauthorized requests', async t => {
+  for (const options of [{ ambiguous: true }, {}]) await t.test(JSON.stringify(options), async t => {
+    const f = await fixture(t, options)
+    if (!options.ambiguous) f.channel.authorizes = () => false
+    await f.handlers['hermes/turn-summary']({ sessionId: 'audit-session', turnId: 1, summaryId: 's', text: 'summary' })
+    assert.equal(f.calls.length, 0)
   })
 })
 

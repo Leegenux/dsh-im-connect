@@ -41,6 +41,7 @@ export function recoverTurn(events: Event[], requestId: string, skipInterimText 
 
 export class DeferredDelivery {
   private entries: DeferredEntry[] = []
+  private summaries: Array<{ id: string; sessionId: string; turn: number; requestId: string; text: string }> = []
   private readonly queue = new KeyedSerialQueue()
   private readonly active = new Set<string>()
   private readonly quarantined = new Set<string>()
@@ -49,6 +50,8 @@ export class DeferredDelivery {
     try {
       const parsed = JSON.parse(readFileSync(file, 'utf8'))
       if (parsed.version !== 1 || !Array.isArray(parsed.entries)) throw new Error('Invalid delivery journal')
+      if (parsed.summaries !== undefined && (!Array.isArray(parsed.summaries) || parsed.summaries.some((s: any) => typeof s.id !== 'string' || typeof s.sessionId !== 'string' || !Number.isSafeInteger(s.turn) || typeof s.requestId !== 'string' || typeof s.text !== 'string'))) throw new Error('Invalid summary journal')
+      this.summaries = parsed.summaries ?? []
       for (const entry of parsed.entries) {
         if (typeof entry.id !== 'string' || typeof entry.sessionId !== 'string' || typeof entry.channelId !== 'string'
           || typeof entry.message?.chatId !== 'string' || !['dm', 'group'].includes(entry.message.kind)
@@ -68,7 +71,18 @@ export class DeferredDelivery {
       if ((error as { code?: string }).code !== 'ENOENT') throw error
     }
   }
-  private flush(): void { if (this.file) writeFileAtomicSync(this.file, JSON.stringify({ version: 1, entries: this.entries }), 0o600) }
+  private flush(): void { if (this.file) writeFileAtomicSync(this.file, JSON.stringify({ version: 1, entries: this.entries, summaries: this.summaries }), 0o600) }
+  /** Record the complete summary before I/O. Existing or uncertain attempts are never retried. */
+  beginSummary(id: string, sessionId: string, turn: number, requestId: string, text: string): boolean {
+    if (!this.file || text.length > 4096) return false
+    const previous = this.summaries
+    const retainedRequests = new Set(this.entries.map(entry => entry.id))
+    if (!retainedRequests.has(requestId) || previous.some(summary => summary.sessionId === sessionId && summary.turn === turn)) return false
+    this.summaries = previous.filter(summary => retainedRequests.has(summary.requestId))
+    this.summaries.push({ id, sessionId, turn, requestId, text })
+    try { this.flush() } catch (error) { this.summaries = previous; throw error }
+    return true
+  }
   list(channelId?: string, message?: ImMessage): DeferredEntry[] {
     return this.entries.filter(e => (!channelId || e.channelId === channelId) && (!message || (e.message.chatId === message.chatId && e.message.kind === (message.kind ?? 'dm') && e.message.userId === message.userId))).map(e => structuredClone(e))
   }

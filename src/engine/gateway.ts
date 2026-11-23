@@ -284,6 +284,9 @@ export class ImEngine {
           this.progress.inbox(kind, payload)
         }, { global: true }))
       }
+      this.disposeEvents.push(on('hermes/turn-summary', (...args: unknown[]) => {
+        return this.deliverTurnSummary(args[0]).catch(() => this.log('[im-delivery] 回合摘要投递失败，未自动重试'))
+      }, { global: true }))
       this.disposeEvents.push(on('session/event', (...args: unknown[]) => {
         void this.onSessionEvent(args[0] as { id?: string }, args[1] as { type?: string; data?: { message?: { content?: Array<{ type?: string; text?: string }> }; chunk?: { type?: string; text?: string } } })
       }, { global: true }))
@@ -636,6 +639,33 @@ export class ImEngine {
     const binding = this.router.lookup(entry.channelId, entry.message.kind ?? 'dm', entry.message.chatId)
     return binding?.sessionId === entry.sessionId && (entry.turn === undefined || !this.progress.hasNewerTurn(entry.sessionId, entry.turn))
       && decideAccess({ userAllowed: this.isAuthorized(entry.channelId, channel, entry.message), kind: entry.message.kind, addressed: true }) === 'allow'
+  }
+
+  private async deliverTurnSummary(value: unknown): Promise<void> {
+    const event = value as { sessionId?: unknown; turnId?: unknown; summaryId?: unknown; text?: unknown } | null
+    if (!event || typeof event.sessionId !== 'string' || !event.sessionId || !Number.isSafeInteger(event.turnId)
+      || typeof event.summaryId !== 'string' || !event.summaryId || typeof event.text !== 'string' || !event.text.trim()) return
+    const sessionId = event.sessionId, turnId = event.turnId as number
+    const entries = this.deferred.turnEntries(sessionId, turnId)
+    if (entries.length !== 1) return
+    const entry = entries[0]!
+    const channel = this.channels.get(entry.channelId)
+    const allowed = () => {
+      const binding = this.router.bindingForSession(sessionId)
+      const current = this.deferred.turnEntries(sessionId, turnId)
+      return !this.disposed && !!channel && this.channels.get(entry.channelId) === channel && channel.id === 'telegram' && !!channel.sendWithReceipt
+        && !!channel.canDeliverDeferred?.() && !this.router.isMuted(sessionId) && current.length === 1 && current[0]!.id === entry.id
+        && current[0]!.status !== 'blocked' && binding?.channelId === entry.channelId && binding.chatId === entry.message.chatId && this.validDelivery(current[0]!)
+    }
+    if (!allowed()) return
+    const id = createHash('sha256').update(JSON.stringify(['hermes-summary', sessionId, turnId, event.summaryId])).digest('hex')
+    if (!this.deferred.beginSummary(id, sessionId, turnId, entry.id, event.text)) return
+    const parts = splitText(event.text, Math.max(1, (channel!.maxMessageLength ?? 2000) - 32))
+    for (const [part, text] of parts.entries()) {
+      if (!allowed()) return
+      const deliveryId = createHash('sha256').update(JSON.stringify([id, part])).digest('hex')
+      await this.auditOperation({ sessionId, turnId, requestId: entry.id, deliveryId }, () => channel!.sendWithReceipt!(entry.message.chatId, text))
+    }
   }
 
   private async recoverDelivery(entry: DeferredEntry, fresh = false, explicit = false): Promise<'missing' | 'unavailable' | undefined> {
