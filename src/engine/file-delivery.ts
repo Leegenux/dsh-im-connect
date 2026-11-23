@@ -51,7 +51,8 @@ export class FileDelivery {
 
   dispose(): void { this.lifetime.abort(); this.sent.clear() }
 
-  deliver(session: DeliverySession, closing: Event, target: () => { channel: ChannelAdapter; chatId: string } | undefined, onContent?: () => void): Promise<boolean> {
+  deliver(session: DeliverySession, closing: Event, target: () => { channel: ChannelAdapter; chatId: string } | undefined, onContent?: () => void,
+    sendFile?: (channel: ChannelAdapter, chatId: string, file: { name: string; data: Uint8Array }, signal: AbortSignal, index: number) => Promise<void>): Promise<boolean> {
     let ok = true
     const initial = target()
     return this.queue.run(String(session.id), async () => {
@@ -64,7 +65,7 @@ export class FileDelivery {
       const sent = this.sent.get(key) ?? new Set<string>()
       this.sent.set(key, sent)
       if (this.sent.size > 256) this.sent.delete(this.sent.keys().next().value!)
-      for (const path of selected.paths) {
+      for (const [index, path] of selected.paths.entries()) {
         if (this.lifetime.signal.aborted) { ok = false; return }
         const current = target()
         if (!current || current.channel !== initial.channel || current.chatId !== initial.chatId) { ok = false; return }
@@ -82,7 +83,9 @@ export class FileDelivery {
           if (!result.eof || result.offset !== 0 || typeof result.data !== 'string') throw new Error('incomplete-file')
           const latest = target()
           if (!latest || latest.channel !== initial.channel || latest.chatId !== initial.chatId) { ok = false; return }
-          await latest.channel.sendFile!(latest.chatId, { name, data: Buffer.from(result.data, 'base64') }, signal)
+          const file = { name, data: Buffer.from(result.data, 'base64') }
+          if (sendFile) await sendFile(latest.channel, latest.chatId, file, signal, index)
+          else await latest.channel.sendFile!(latest.chatId, file, signal)
           sent.add(identity)
         } catch (error) {
           if (this.lifetime.signal.aborted) { ok = false; return }

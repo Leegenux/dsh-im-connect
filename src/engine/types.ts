@@ -91,6 +91,8 @@ export interface ChannelAdapter {
   sendChoices?(message: ImMessage, text: string, buttons: Array<{ label: string; token: string }>, options?: { numberedChoicesIncluded?: boolean }): Promise<void | ChoiceReceipt>
   /** 发送宿主已允许读取的完整文件；失败必须抛错，取消后不继续提交消息。 */
   sendFile?(chatId: string, file: { name: string; data: Uint8Array }, signal?: AbortSignal): Promise<void>
+  /** Optional platform receipt for the same file delivery operation. */
+  sendFileWithReceipt?(chatId: string, file: { name: string; data: Uint8Array }, signal?: AbortSignal): Promise<{ platformMessageId?: string }>
   setMessageHandler(handler: (msg: ImMessage) => void | Promise<void>): void
   status(): string
   /** 使用平台查询或现有连接心跳诊断，不发送聊天消息，也不启动新连接。 */

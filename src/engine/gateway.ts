@@ -622,7 +622,16 @@ export class ImEngine {
     }, current => this.validDelivery(current), async (current, text) => {
       const channel = this.channels.get(current.channelId)
       if (!channel || (!fresh && !channel.canDeliverDeferred?.())) throw new DeliveryUnavailable()
-      await channel.send(current.message.chatId, text)
+      const matches = this.deferred.turnEntries(current.sessionId, current.turn)
+      if (channel.id === 'telegram' && channel.sendWithReceipt && Number.isSafeInteger(current.turn)
+        && matches.length === 1 && matches[0]!.id === current.id && matches[0]!.channelId === current.channelId) {
+        const identity = {
+          sessionId: current.sessionId, turnId: current.turn!, requestId: current.id,
+          deliveryId: createHash('sha256').update(JSON.stringify(['replay', current.sessionId, current.turn, current.id, current.offset])).digest('hex'),
+          attemptId: crypto.randomUUID(),
+        }
+        await this.auditOperation(identity, () => channel.sendWithReceipt!(current.message.chatId, text))
+      } else await channel.send(current.message.chatId, text)
     }, text => splitText(text, Math.max(1, (this.channels.get(entry.channelId)?.maxMessageLength ?? 2000) - 32)), explicit)
   }
 
@@ -1427,7 +1436,7 @@ export class ImEngine {
         }
         const turnId = event.data?.turn ?? this.observedTurns.get(sessionId)
         const entries = this.deferred.turnEntries(sessionId, turnId)
-        const audit: DeliveryAuditIdentity | undefined = channel.id === 'telegram' && turnId !== undefined && entries.length === 1
+        const audit: DeliveryAuditIdentity | undefined = channel.id === 'telegram' && turnId !== undefined && entries.length === 1 && entries[0]!.channelId === channel.id
           ? { sessionId, turnId, requestId: entries[0]!.id, seq: Number.isSafeInteger(event.seq) ? event.seq : undefined, part: 0 } : undefined
         if (taken.stream) {
           const finalText = text || taken.text
@@ -1501,7 +1510,19 @@ export class ImEngine {
       } finally {
         const filesOk = await this.fileDelivery.deliver(session, event, () => {
           return !stopped && stillDeliverable() ? { channel, chatId: binding.chatId } : undefined
-        }, () => { outcome.content = true; markAttempt() })
+        }, () => { outcome.content = true; markAttempt() }, async (fileChannel, chatId, file, signal, index) => {
+          const turn = event.data?.turn
+          const matches = this.deferred.turnEntries(sessionId, turn)
+          if (fileChannel.id !== 'telegram' || !fileChannel.sendFileWithReceipt || !Number.isSafeInteger(turn) || matches.length !== 1 || matches[0]!.channelId !== fileChannel.id) {
+            await fileChannel.sendFile!(chatId, file, signal)
+            return
+          }
+          const requestId = matches[0]!.id
+          const deliveryId = Number.isSafeInteger(event.seq)
+            ? createHash('sha256').update(JSON.stringify(['file', sessionId, turn, requestId, event.seq, index])).digest('hex')
+            : crypto.randomUUID()
+          await this.auditOperation({ sessionId, turnId: turn!, requestId, deliveryId }, () => fileChannel.sendFileWithReceipt!(chatId, file, signal))
+        })
         outcome.ok = outcome.ok && filesOk
       }
     }
@@ -1765,6 +1786,21 @@ export class ImEngine {
       const emit = (this.ctx as unknown as { emit?: (name: string, value: object) => unknown }).emit
       if (emit) void Promise.resolve(emit.call(this.ctx, 'im/delivery-audit', event)).catch(() => undefined)
     } catch { /* Observers must never affect delivery. */ }
+  }
+
+  /** Observe a single adapter operation without changing its result or retry behavior. */
+  private async auditOperation(identity: { sessionId: string; turnId: number; requestId: string; deliveryId: string; attemptId?: string }, send: () => Promise<{ platformMessageId?: string }>): Promise<void> {
+    this.observeAudit({ ...identity, phase: 'created' })
+    this.observeAudit({ ...identity, phase: 'handed_off' })
+    try {
+      const receipt = await send()
+      this.observeAudit(receipt.platformMessageId
+        ? { ...identity, phase: 'result', outcome: 'acknowledged', platformMessageId: receipt.platformMessageId }
+        : { ...identity, phase: 'result', outcome: 'unknown' })
+    } catch (error) {
+      this.observeAudit({ ...identity, phase: 'result', outcome: isDefiniteSendFailure(error) ? 'failed' : 'unknown' })
+      throw error
+    }
   }
 
   private async sendChunk(channel: ChannelAdapter, chatId: string, chunk: string, deadline: number, audit?: DeliveryAuditIdentity): Promise<{ ok: true; receipt?: DeliveryReceipt } | { ok: false; error: unknown }> {
