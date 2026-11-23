@@ -4842,10 +4842,8 @@ body:not([data-ds-dark-theme]) .ima-section-card{background:var(--dsw-alias-bg-l
         };
         filterPayload(account.platform, patch, payload);
         return onSave(account.id, payload).then((ok) => {
-          if (seq === saveSeq.current) {
-            setNote(ok ? "status.saved" : "error.save");
-            if (!ok && Object.prototype.hasOwnProperty.call(patch, "topicNaming")) setDraft((current) => ({ ...current, topicNaming: draft.topicNaming }));
-          }
+          if (seq === saveSeq.current) setNote(ok ? "status.saved" : "error.save");
+          if (seq === saveSeq.current && !ok && Object.prototype.hasOwnProperty.call(patch, "topicNaming")) setDraft((current) => ({ ...current, topicNaming: draft.topicNaming }));
           return ok;
         });
       };

@@ -176,6 +176,12 @@ test('运行中的 Telegram 账号在群聊策略变更时会触发 startOne 重
   // 白名单变更：freeChatGroups 变更应触发重启
   await manager.updateAccount(created.accountId, { freeChatGroups: '-100111' })
   assert.equal(restartCount, 2, '白名单变更应触发重启')
+  await manager.updateAccount(created.accountId, { mentionPolicy: 'always', freeChatGroups: [] })
+  const before = restartCount
+  await manager.updateAccount(created.accountId, { freeChatGroups: [] })
+  assert.equal(restartCount, before + 1, 'explicit list must revoke always and restart even when the list is unchanged')
+  const effective = await manager.resolveSecrets('telegram', created.accountId, manager.store.channels[created.accountId].config)
+  assert.equal(effective.mentionPolicy, undefined)
 })
 
 test('非 Telegram 账号忽略群聊触发策略配置', async t => {

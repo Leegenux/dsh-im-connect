@@ -1164,6 +1164,7 @@ export class ChannelManager {
           return { ok: false, error: '手动配置代理时必须填写代理地址' }
         }
       }
+      const previousMentionPolicy = state.config?.mentionPolicy === 'always' && (state.freeChatGroups === undefined || state.config?.mentionPolicyExplicit === 'true') ? 'always' : 'addressed'
       const normalized = await this.normalizeAccountSettings(platform, input, state)
       if (!normalized.ok) return normalized
       const freeChatGroupsChanged = platform === 'telegram' && input.freeChatGroups !== undefined
@@ -1228,8 +1229,9 @@ export class ChannelManager {
       const hasMentionPolicySettings = platform === 'telegram' && (
         Object.hasOwn(input, 'mentionPolicy') || Object.hasOwn(input, 'freeChatGroups')
       )
-      const previousMentionPolicy = state.config?.mentionPolicy === 'always' ? 'always' : 'addressed'
-      const requestedMentionPolicy = input.mentionPolicy === undefined ? previousMentionPolicy : (input.mentionPolicy === 'always' ? 'always' : 'addressed')
+      const requestedMentionPolicy = input.mentionPolicy === undefined
+        ? (input.freeChatGroups !== undefined ? 'addressed' : previousMentionPolicy)
+        : (input.mentionPolicy === 'always' ? 'always' : 'addressed')
       const mentionPolicyChanged = hasMentionPolicySettings && requestedMentionPolicy !== previousMentionPolicy
       if (hasMentionPolicySettings) {
         const config = { ...(state.config ?? {}) }
