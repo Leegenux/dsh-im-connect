@@ -1340,7 +1340,9 @@ export function createTelegramChannel(config: TelegramConfig, log: (line: string
           let richMessage: Record<string, unknown> | undefined
           if (!richDisabled) {
             if (codeFrom === undefined) {
-              const markdown = toTelegramRichMarkdown(next)
+              // Protect tool names in a status without a code preview. The body and plain fallback remain literal inputs.
+              const escapedStatus = next.slice(0, statusEnd).replace(/[\\_]/g, '\\$&')
+              const markdown = toTelegramRichMarkdown(escapedStatus + next.slice(statusEnd))
               if (markdown !== undefined) richMessage = { markdown }
             } else {
               const prefix = next.slice(0, codeFrom)
